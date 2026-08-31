@@ -1,0 +1,10 @@
+{
+  "TESTCLB_X0Y0": {
+    "type": "TESTCLB",
+    "grid_x": 0,
+    "grid_y": 0,
+    "sites": {
+      "SLICE_X0Y0": "SLICEX"
+    }
+  }
+}

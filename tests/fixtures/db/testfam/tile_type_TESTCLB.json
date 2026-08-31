@@ -1,0 +1,28 @@
+{
+  "tile_type": "TESTCLB",
+  "wires": {
+    "A1": null, "A2": null, "A3": null, "A4": null, "A5": null, "A6": null,
+    "A": null, "AQ": null, "CLK": null
+  },
+  "pips": {},
+  "sites": [
+    {
+      "name": "SLICE_X0Y0",
+      "prefix": "SLICE",
+      "type": "SLICEX",
+      "x_coord": 0,
+      "y_coord": 0,
+      "site_pins": {
+        "A1": {"wire": "A1"},
+        "A2": {"wire": "A2"},
+        "A3": {"wire": "A3"},
+        "A4": {"wire": "A4"},
+        "A5": {"wire": "A5"},
+        "A6": {"wire": "A6"},
+        "A": {"wire": "A"},
+        "AQ": {"wire": "AQ"},
+        "CLK": {"wire": "CLK"}
+      }
+    }
+  ]
+}
