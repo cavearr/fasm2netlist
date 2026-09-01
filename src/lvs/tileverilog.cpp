@@ -23,6 +23,7 @@
 //   - carry, distributed RAM and SRL are absent: a slice using them still gets
 //     an instance, and its unmodelled features are listed on stderr.
 #include "json.hpp"
+#include "lvs/regmap.hpp"
 #include "lvs/tileconfig.hpp"
 
 #include <algorithm>
@@ -81,6 +82,7 @@ struct TileInfo
 int main(int argc, char **argv)
 {
     std::string fasm, db, device = "xc7vx485t", out_path, model_path, xdc_path, part;
+    std::string placement_path, gold_json_path;
     std::vector<std::string> input_pats;   // substrings naming genuinely external nets
     int hops = 0;                          // rounds of reachability growth
     bool simple_clock = true;              // see the note on the clock tree below
@@ -101,6 +103,8 @@ int main(int argc, char **argv)
         else if (a == "--routed-clock") simple_clock = false;
         else if (a == "--pullup") pullup = atoi(next().c_str());
         else if (a == "--default-ppips") use_default_ppips = true;
+        else if (a == "--placement") placement_path = next();
+        else if (a == "--gold-json") gold_json_path = next();
         else { std::cerr << "usage: tileverilog --fasm f.fasm --db <prjxray-db>/<family> "
                             "[--device xc7vx485t] [--out out.v]\n"
                             "                   [--input <substring>]...  nets driven from outside\n"; return 2; }
@@ -136,7 +140,13 @@ int main(int argc, char **argv)
     for (const auto &kv : dc.slices) used.insert(kv.second.tile);
     for (const auto &kv : dc.other_tiles) used.insert(kv.first);
 
-    json::Value tc = json::parse(readFile(db + "/tileconn.json"));
+    // tileconn lives per-device in some families and per-family in others
+    auto tileconn_path = [&] {
+        std::string per_device = db + "/" + device + "/tileconn.json";
+        std::ifstream probe(per_device);
+        return probe ? per_device : db + "/tileconn.json";
+    }();
+    json::Value tc = json::parse(readFile(tileconn_path));
 
     // The XDC names the design's pads; pull their tiles in before the net
     // closure, or the pad wires never enter the graph and cannot be labelled.
@@ -156,7 +166,7 @@ int main(int argc, char **argv)
         std::ifstream xf(xdc_path);
         // `set_property PACKAGE_PIN <pin> [get_ports <name>]`, plain or -dict,
         // with the port optionally braced: {led[0]} keeps its subscript.
-        static const std::regex re(R"(PACKAGE_PIN\s+(\S+).*?get_ports\s*(?:\{\s*([^\}]+?)\s*\}|([^\]\s]+)))");
+        static const std::regex re(R"((?:PACKAGE_PIN|LOC)\s+(\S+).*?get_ports\s*(?:\{\s*([^\}]+?)\s*\}|([^\]\s]+)))");
         while (std::getline(xf, line)) {
             std::smatch m;
             if (!std::regex_search(line, m, re)) continue;
@@ -322,6 +332,22 @@ int main(int argc, char **argv)
     bufg_outs.erase(std::unique(bufg_outs.begin(), bufg_outs.end()), bufg_outs.end());
 
     int clocked = 0;
+    if (simple_clock && bufg_outs.empty()) {
+        // No BUFG output is named in the FASM.  The simplification still
+        // holds -- every slice clock is the same net, arriving from outside --
+        // so unify them on the first one and let it become a port.
+        for (const auto &kv : dc.slices) {
+            auto ti = tiles.find(kv.second.tile);
+            if (ti == tiles.end()) continue;
+            int ordinal = kv.second.site.back() - '0';
+            const auto &per = site_pins[ti->second.type];
+            if (ordinal >= int(per.size())) continue;
+            auto pin = per[ordinal].find("CLK");
+            if (pin == per[ordinal].end()) continue;
+            bufg_outs.push_back(tw(kv.second.tile, pin->second));
+        }
+        if (!bufg_outs.empty()) bufg_outs.resize(1);
+    }
     if (simple_clock && !bufg_outs.empty()) {
         for (const auto &kv : dc.slices) {
             auto ti = tiles.find(kv.second.tile);
@@ -434,10 +460,46 @@ int main(int argc, char **argv)
             std::cerr << "  XDC: labelled " << named << " of " << xdc_ports.size() << " pads\n";
     }
 
+    // The same three files that tell the equivalence checker which fabric net
+    // is which register also let the dump be written in the designer's own
+    // vocabulary.  A pad's XDC name wins where the two collide: a port name is
+    // a fact about the board, a register name only about the synthesis.
+    std::map<std::string, std::string> reg_label;   // tile/wire -> source signal
+    if (!placement_path.empty() && !gold_json_path.empty()) {
+        lvs::RegMap rm = lvs::build_regmap(placement_path, gold_json_path, db, device);
+        reg_label = rm.net;
+        int named = 0;
+        for (const auto &kv : rm.net) {
+            if (!dsu.parent.count(kv.first)) continue;
+            std::string root = dsu.find(kv.first);
+            if (friendly.count(root)) continue;
+            friendly[root] = kv.second;
+            named++;
+        }
+        std::cerr << "  placement: labelled " << named << " of " << rm.mapped << " registers\n";
+    }
+
     // One place decides how a net is written: its XDC name where it has one,
     // otherwise the sanitised (tile, wire).  Used by the declarations, the
     // routing assigns and the instance pins alike -- writing a net one way in
     // one place and another way elsewhere silently splits it in two.
+    // A column carries a cell of the source design where one was placed on
+    // its flip-flop; naming the instance after that cell makes the dump
+    // readable.  The suffix keeps the instance out of the net namespace.
+    // A column is named after the register it holds.  The placement and the
+    // emitter disagree about what to call a site -- one names it absolutely
+    // (SLICE_X0Y100), the other by its position in the tile -- but they agree
+    // about wires, so the column's output endpoints are what they match on:
+    // the main flip-flop leaves on xQ, the second one on xMUX.
+    auto inst_name = [&](const std::string &tile, const std::string &site, const std::string &col,
+                         const std::string &q, const std::string &mux) {
+        for (const std::string &ep : {q, mux}) {
+            auto it = reg_label.find(ep);
+            if (it != reg_label.end()) return it->second + "_i";
+        }
+        return sanitise(tile + "_" + site + "_" + col);
+    };
+
     auto emit_net = [&](const std::string &endpoint) {
         std::string root = dsu.find(endpoint);
         auto f = friendly.find(root);
@@ -460,23 +522,33 @@ int main(int argc, char **argv)
 // this model does not implement resolve to 0 and are reported by the emitter.
 module xcol #(
     parameter [63:0] INIT = 64'h0,
-    parameter FF_SRC  = "none",   // O6 | O5 | X | none
+    parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | none
     parameter FF5_SRC = "none",   // O5 | X | none
-    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | none
+    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | none
+    parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
     parameter SYNC = 1'b1
 ) (
     input  wire A1, A2, A3, A4, A5, A6, X,
-    input  wire CLK, CE, SR,
-    output wire O6, O5, Q, MUX
+    input  wire CLK, CE, SR, CI,
+    output wire O6, O5, Q, MUX, CO
 );
     wire [5:0] idx6 = {A6, A5, A4, A3, A2, A1};
     wire [5:0] idx5 = {1'b0, A5, A4, A3, A2, A1};
     assign O6 = INIT[idx6];
     assign O5 = INIT[idx5];
 
-    wire ff_d  = (FF_SRC  == "O6") ? O6 : (FF_SRC  == "O5") ? O5 : (FF_SRC  == "X") ? X : 1'b0;
+    // CARRY4, one bit of it: O6 is the propagate select, and the data input
+    // is O5 or the bypass depending on CY0.  CO ripples to the next column,
+    // and the XOR output is the sum bit.
+    wire di  = (CY0 == "O5") ? O5 : X;
+    assign CO = O6 ? CI : di;
+    wire xo  = O6 ^ CI;
+
+    wire ff_d  = (FF_SRC  == "O6")  ? O6 : (FF_SRC  == "O5") ? O5 :
+                 (FF_SRC  == "X")   ? X  : (FF_SRC  == "XOR") ? xo :
+                 (FF_SRC  == "CY")  ? CO : 1'b0;
     wire ff5_d = (FF5_SRC == "O5") ? O5 : (FF5_SRC == "X")  ? X  : 1'b0;
 
     reg q = FF_INIT, q5 = FF5_INIT;
@@ -494,7 +566,9 @@ module xcol #(
         end
 
     assign Q   = q;
-    assign MUX = (OUTMUX == "O6") ? O6 : (OUTMUX == "O5") ? O5 : (OUTMUX == "5Q") ? q5 : 1'b0;
+    assign MUX = (OUTMUX == "O6")  ? O6 : (OUTMUX == "O5") ? O5 :
+                 (OUTMUX == "5Q")  ? q5 : (OUTMUX == "XOR") ? xo :
+                 (OUTMUX == "CY")  ? CO : 1'b0;
 endmodule
 
 )";
@@ -511,6 +585,8 @@ endmodule
 
     // slice instances (built first: slice outputs count as driven)
     std::ostringstream body;
+    std::vector<std::string> carry_wires;
+    std::vector<std::pair<std::string, std::string>> carry_assigns;
     int inst = 0, unmodelled = 0;
     for (const auto &kv : dc.slices) {
         const SliceConfig &sc = kv.second;
@@ -531,6 +607,34 @@ endmodule
         };
         unmodelled += int(sc.unhandled.size());
 
+        // The carry chain runs A -> B -> C -> D and on to the slice above.
+        // Its start comes from PRECYINIT; its end drives the COUT site pin,
+        // which tileconn joins to the CIN of the slice above.
+        std::string prefix = sanitise(sc.tile + "_" + sc.site);
+        bool has_carry = false;
+        for (const auto &cc : sc.columns) has_carry |= cc.second.carry_used;
+        std::map<char, std::string> ci_of, co_of;
+        if (has_carry) {
+            std::string start;
+            switch (sc.precyinit) {
+            case PreCyInit::Zero: start = "1'b0"; break;
+            case PreCyInit::One:  start = "1'b1"; break;
+            case PreCyInit::AX:   start = net("AX"); break;
+            case PreCyInit::CIN:  start = net("CIN"); break;
+            default:              start = "1'b0"; break;
+            }
+            std::string prev = start;
+            for (char c : {'A', 'B', 'C', 'D'}) {
+                std::string co = prefix + "_CO_" + c;
+                carry_wires.push_back(co);
+                ci_of[c] = prev;
+                co_of[c] = co;
+                prev = co;
+            }
+            std::string cout_pin = net("COUT");
+            if (cout_pin != "1'b0") carry_assigns.push_back({cout_pin, co_of['D']});
+        }
+
         for (const auto &cc : sc.columns) {
             char c = cc.first;
             const ColumnConfig &col = cc.second;
@@ -541,11 +645,12 @@ endmodule
             std::ostringstream initv;
             initv << "64'h" << std::hex << (col.init ? *col.init : 0);
             body << "  xcol #(." << "INIT(" << initv.str() << "), .FF_SRC(\"" << ffsrc
-               << "\"), .FF5_SRC(\"" << ff5src << "\"), .OUTMUX(\"" << to_string(col.outmux) << "\"),\n"
+               << "\"), .FF5_SRC(\"" << ff5src << "\"), .OUTMUX(\"" << to_string(col.outmux)
+               << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
                << "), .FF5_INIT(1'b" << col.ff5_init << "), .FF5_SRVAL(1'b" << col.ff5_srval
                << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "))\n"
-               << "    \\" << sanitise(sc.tile + "_" + sc.site + "_" + C) << " (";
+               << "    \\" << inst_name(sc.tile, sc.site, C, raw(C + "Q"), raw(C + "MUX")) << " (";
             for (int i = 1; i <= 6; i++) body << ".A" << i << "(" << net(C + std::to_string(i)) << "), ";
             body << ".X(" << net(C + "X") << "), .CLK(" << net("CLK") << "), "
                << ".CE(" << (sc.ceusedmux ? net("CE") : std::string("1'b1")) << "), "
@@ -554,7 +659,8 @@ endmodule
                // has no pin of its own -- it reaches the world through the 5FF
                // or the xMUX, both of which are wired below.
                << "     .O6(" << net(C) << "), .O5(), .Q(" << net(C + "Q")
-               << "), .MUX(" << net(C + "MUX") << "));\n";
+               << "), .MUX(" << net(C + "MUX") << "), .CO("
+               << (co_of.count(c) ? co_of[c] : std::string()) << "));\n";
             if (!raw(C).empty()) driven_raw.insert(raw(C));
             if (!raw(C + "Q").empty()) driven_raw.insert(raw(C + "Q"));
             if (!raw(C + "MUX").empty()) driven_raw.insert(raw(C + "MUX"));
@@ -618,6 +724,8 @@ endmodule
     os << "\n";
     for (const auto &a : assigns)
         os << "  assign " << emit_net(a.first) << " = " << emit_net(a.second) << ";\n";
+    for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
+    for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
     os << "\n" << body.str() << "endmodule\n";
 
     if (simple_clock)

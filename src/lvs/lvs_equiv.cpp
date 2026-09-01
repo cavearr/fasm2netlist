@@ -12,6 +12,7 @@
 #include "lvs/cone.hpp"
 #include "lvs/netlist.hpp"
 #include "lvs/solver.hpp"
+#include "lvs/regmap.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -46,6 +47,8 @@ std::string emit(const BoolNet &net, Lit target, Format fmt)
 int main(int argc, char **argv)
 {
     std::string gold_path, gate_path, top = "top", gold_top, gate_top, dump_prefix, map_path;
+    std::vector<std::pair<std::string, std::string>> compare;   // arbitrary net pairs
+    std::string placement_p, gold_json_p, db, device;
     Solver solver = Solver::z3();
     bool quiet = false;
 
@@ -60,6 +63,11 @@ int main(int argc, char **argv)
         else if (a == "--solver") solver.command = next();
         else if (a == "--dump-prefix") dump_prefix = next();
         else if (a == "--map") map_path = next();
+        else if (a == "--compare") { std::string g = next(); compare.push_back({g, next()}); }
+        else if (a == "--placement") placement_p = next();
+        else if (a == "--gold-json") gold_json_p = next();
+        else if (a == "--db") db = next();
+        else if (a == "--device") device = next();
         else if (a == "--quiet") quiet = true;
         else if (a == "--format") solver.format = (next() == "dimacs") ? Format::Dimacs : Format::SmtLib2;
         else { usage(); return 2; }
@@ -86,6 +94,23 @@ int main(int argc, char **argv)
     // miter between them ask about the same variables.  Without it the two
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
+
+    // Build the register correspondence here rather than in a helper script:
+    // it is a filter on this program's own input, and it needs nothing but the
+    // placement, the gold netlist and the database.
+    if (!placement_p.empty() && !gold_json_p.empty() && !db.empty()) {
+        lvs::RegMap rm = lvs::build_regmap(placement_p, gold_json_p, db, device);
+        auto sanitise = [](const std::string &in) {
+            std::string r;
+            for (char c : in) r.push_back(isalnum((unsigned char)c) ? c : '_');
+            return r;
+        };
+        for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
+        std::cout << "register map: " << rm.mapped << " from the placement";
+        if (rm.skipped) std::cout << ", " << rm.skipped << " unmapped";
+        std::cout << " (gold module " << rm.module << ")\n";
+    }
+
     if (!map_path.empty()) {
         std::ifstream mf(map_path);
         if (!mf) { std::cerr << "cannot open " << map_path << "\n"; return 2; }
@@ -99,7 +124,25 @@ int main(int argc, char **argv)
     }
 
     BoolNet net;
-    Cones gold(*gold_m, net), gate(*gate_m, net, gate_to_gold);
+    Cones gold(*gold_m, net);
+
+    // The map's gold-side label need not be the name gold's own netlist uses:
+    // a net can answer to several names (yosys writes the top-level `led_int`,
+    // the placement labels it by the RTL name `core.johnson`).  Resolve each
+    // label to the state name gold actually carries, or the two sides end up
+    // with different free variables for the same register and every cone
+    // "differs".
+    {
+        std::map<std::string, std::string> resolved;
+        for (const auto &[gate_net, label] : gate_to_gold) {
+            std::string target = label;
+            for (const auto &g : gold.states())
+                if (g == label || gold.synonyms(g).count(label)) { target = g; break; }
+            resolved[gate_net] = target;
+        }
+        gate_to_gold.swap(resolved);
+    }
+    Cones gate(*gate_m, net, gate_to_gold);
 
     // Match by any shared name, not just an identical one.  With --map the
     // gate's states already carry the gold's names, so this is an equality.
@@ -145,6 +188,15 @@ int main(int argc, char **argv)
         else if (r == Result::Sat) { differ++; std::cout << "  DIFFER  " << label << "\n"; }
         else { unknown++; std::cout << "  unknown " << label << "\n"; }
     };
+
+    for (const auto &[gn, tn] : compare)
+        check(gn + " vs " + tn, gold.value_of(gn), gate.value_of(tn));
+    if (!compare.empty() && common.empty()) {
+        auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "\n" << proved << " proved, " << differ << " differ, " << unknown
+                  << " unknown   (" << secs << "s)\n";
+        return differ == 0 && unknown == 0 ? 0 : 1;
+    }
 
     for (const auto &[g, t] : common)
         check(g == t ? g : (g + " = " + t), gold.next_state(g), gate.next_state(t));

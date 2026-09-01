@@ -29,6 +29,10 @@ class Cones
     Lit next_state(const std::string &state_name);
     // Value of an output port bit, e.g. ("led", 3).
     Lit output_bit(const std::string &port, int bit);
+    // Any net, by name -- for comparing an internal node rather than a
+    // register or a port.  Localising a difference means being able to ask
+    // about the signals between them.
+    Lit value_of(const std::string &net) { return eval_net(net, 0); }
 
     const std::set<std::string> &states() const { return states_; }
     // Every name this net answers to.  A net can be named more than once --

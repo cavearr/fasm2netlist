@@ -13,7 +13,7 @@ values".
 Correspondence is by port name: gold's exposed port `\\core.prbs[0]` pairs with
 gate's `\\core.prbs[0]_i.Q`, the cell-name form yosys gives the wire after
 flattening.  Register renaming has to have happened already -- see
-annotate_lvs.py.
+`tileverilog --placement`.
 """
 import re, sys
 

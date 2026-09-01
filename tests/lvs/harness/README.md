@@ -31,8 +31,6 @@ hours:
 
 ## The comparison flow
 
-    annotate_lvs.py     rename an extraction's cells/nets to the source
-                        netlist's own names, from a placement dump
     expose_ffs.ys.in    yosys: proc, flatten, expose -dff -- makes every
                         flip-flop observable as a module port
     gen_miter_tb.py     Verilator testbench comparing every matched FF and
@@ -45,3 +43,23 @@ hours:
 
 `.ys.in` files carry absolute paths for the design under test; substitute them
 rather than editing in place.
+
+## Moved into the tools
+
+Three scripts used to filter what the C++ read or wrote: one stripped unused
+blackbox declarations out of a yosys netlist, one composed the placement with
+the gold netlist to map registers onto fabric nets, and one rewrote an
+extraction in the source design's names.  None needed anything Python brings
+that C++ does not, and a filter either side of a tool is a part of that tool
+that can rot separately, so all three now live in it:
+
+* stripping -- unnecessary; `yosys ... select <top>; write_verilog -selected`
+  emits the one module on its own.
+* the register map -- `src/lvs/regmap.cpp`, reached as
+  `lvs_equiv --placement ... --gold-json ... --db ... --device ...`.
+* the renaming -- the same map, reached as `tileverilog --placement ...
+  --gold-json ...`, which labels nets and columns as it emits them.
+
+What is left here needs something the standard library does not have (z3,
+pysat, Verilator) or is a cross-check that is meant to be written
+independently of the thing it checks.

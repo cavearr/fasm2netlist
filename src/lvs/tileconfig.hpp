@@ -30,9 +30,14 @@ enum class FF5Src { O5, BypassX };
 // What the column's xMUX output carries.
 enum class OutMux { None, O6, O5, Xor, Q5, Carry, F7, F8, MC31 };
 
+// Where the slice's carry chain starts.  Established from
+// 017-clb-precyinit: one feature per value, 400 cases, no overlap.
+enum class PreCyInit { None, Zero, One, AX, CIN };
+
 const char *to_string(FFSrc s);
 const char *to_string(FF5Src s);
 const char *to_string(OutMux s);
+const char *to_string(PreCyInit s);
 
 struct ColumnConfig
 {
@@ -51,12 +56,19 @@ struct ColumnConfig
     int ff5_init = 1, ff5_srval = 1;
 
     OutMux outmux = OutMux::None;
+
+    // CARRY4.<col>CY0 present selects O5 as the carry mux data input; absent
+    // selects the column's X bypass.  Established from 013-clb-ncy0: 450
+    // cases, present <-> clb_NCY0_O5, absent <-> clb_NCY0_MX.
+    bool carry_used = false;
+    bool cy0_o5 = false;
 };
 
 struct SliceConfig
 {
     std::string tile, tile_type, site;   // e.g. CLBLM_R_X31Y135, CLBLM_R, SLICEM_X0
     bool ffsync = false, clkinv = false, srusedmux = false, ceusedmux = false;
+    PreCyInit precyinit = PreCyInit::None;
     std::map<char, ColumnConfig> columns;
     std::vector<std::string> unhandled;  // features this decoder does not model
 };

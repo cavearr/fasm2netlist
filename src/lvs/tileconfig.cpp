@@ -21,6 +21,16 @@ const char *to_string(FFSrc s)
     }
 }
 const char *to_string(FF5Src s) { return s == FF5Src::O5 ? "O5" : "X"; }
+const char *to_string(PreCyInit s)
+{
+    switch (s) {
+    case PreCyInit::Zero: return "0";
+    case PreCyInit::One: return "1";
+    case PreCyInit::AX: return "AX";
+    case PreCyInit::CIN: return "CIN";
+    default: return "none";
+    }
+}
 const char *to_string(OutMux s)
 {
     switch (s) {
@@ -144,6 +154,27 @@ DesignConfig read_fasm(const std::string &path)
             return cc;
         };
 
+        if (rest.rfind("PRECYINIT.", 0) == 0) {
+            std::string sel = rest.substr(10);
+            if (sel == "C0") sc.precyinit = PreCyInit::Zero;
+            else if (sel == "C1") sc.precyinit = PreCyInit::One;
+            else if (sel == "AX") sc.precyinit = PreCyInit::AX;
+            else if (sel == "CIN") sc.precyinit = PreCyInit::CIN;
+            else sc.unhandled.push_back(rest);
+            continue;
+        }
+        if (rest.rfind("CARRY4.", 0) == 0) {
+            std::string sel = rest.substr(7);
+            // <col>CY0 -- the only CARRY4 feature the corpus shows
+            if (sel.size() == 4 && sel[0] >= 'A' && sel[0] <= 'D' && sel.substr(1) == "CY0") {
+                ColumnConfig &cc = column(sel[0]);
+                cc.carry_used = true;
+                cc.cy0_o5 = true;
+            } else {
+                sc.unhandled.push_back(rest);
+            }
+            continue;
+        }
         if (rest == "FFSYNC") { sc.ffsync = true; continue; }
         if (rest == "NOCLKINV") { sc.clkinv = false; continue; }
         if (rest == "CLKINV") { sc.clkinv = true; continue; }
@@ -208,7 +239,10 @@ void DesignConfig::dump(std::ostream &os) const
     for (const auto &[key, sc] : slices) {
         os << "slice " << key << " type=" << sc.tile_type
            << (sc.ffsync ? " ffsync" : " ffasync") << (sc.clkinv ? " clkinv" : "")
-           << (sc.srusedmux ? " sr" : "") << (sc.ceusedmux ? " ce" : "") << "\n";
+           << (sc.srusedmux ? " sr" : "") << (sc.ceusedmux ? " ce" : "");
+        if (sc.precyinit != PreCyInit::None)
+            os << " precyinit=" << to_string(sc.precyinit);
+        os << "\n";
         for (const auto &[c, cc] : sc.columns) {
             os << "  col " << c;
             if (cc.init) {
@@ -222,7 +256,9 @@ void DesignConfig::dump(std::ostream &os) const
             if (cc.ff5_used)
                 os << " ff5=" << (cc.ff5_src_explicit ? to_string(cc.ff5_src) : "O5(default)")
                    << ",init=" << cc.ff5_init << ",srval=" << cc.ff5_srval;
-            os << " outmux=" << to_string(cc.outmux) << "\n";
+            os << " outmux=" << to_string(cc.outmux);
+            if (cc.carry_used) os << " cy0=" << (cc.cy0_o5 ? "O5" : "X");
+            os << "\n";
         }
         for (const auto &u : sc.unhandled)
             os << "  UNHANDLED " << u << "\n";

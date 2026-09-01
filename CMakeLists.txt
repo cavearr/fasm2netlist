@@ -20,7 +20,7 @@ add_library(lvs_tileconfig STATIC src/lvs/tileconfig.cpp)
 target_compile_options(lvs_tileconfig PRIVATE -Wall -Wextra)
 target_include_directories(lvs_tileconfig PUBLIC src)
 
-add_executable(tileverilog src/lvs/tileverilog.cpp)
+add_executable(tileverilog src/lvs/tileverilog.cpp src/lvs/regmap.cpp)
 target_link_libraries(tileverilog PRIVATE lvs_tileconfig)
 target_include_directories(tileverilog PRIVATE src)
 target_compile_options(tileverilog PRIVATE -Wall -Wextra)
@@ -59,7 +59,7 @@ if(BISON_FOUND AND FLEX_FOUND)
   # generated sources are not ours to keep warning-clean
   target_compile_options(lvs_verilog PRIVATE -Wall -Wextra -Wno-unused-function)
   # Per-register equivalence: netlist -> cones -> miter -> whichever solver.
-  add_executable(lvs_equiv src/lvs/lvs_equiv.cpp src/lvs/cone.cpp)
+  add_executable(lvs_equiv src/lvs/lvs_equiv.cpp src/lvs/cone.cpp src/lvs/regmap.cpp)
   target_link_libraries(lvs_equiv PRIVATE lvs_verilog lvs_miter)
   target_compile_options(lvs_equiv PRIVATE -Wall -Wextra)
 
