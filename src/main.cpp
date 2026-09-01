@@ -8,9 +8,8 @@
 // specific build), never from a placement or routed-JSON dump; cell names
 // are anonymous/auto-generated, not carried over from any toolchain-internal
 // source. This first pass covers the SLICE fabric (LUT6_2 + FDRE/FDSE/
-// FDCE/FDPE) -- top-level IO (IBUF/OBUF/BUFG resolved via .xdc +
-// package_pins.csv) is a separate, not-yet-ported concern, left for a
-// follow-up.
+// FDCE/FDPE) plus top-level IO (IBUF/IBUFDS/OBUF/BUFG, resolved via .xdc +
+// package_pins.csv when --xdc and --part/--bit are given).
 //
 // Scope decisions (flagged explicitly rather than silently assumed):
 //  - FASM tokenizing is a small hand-written line parser scoped to the
@@ -27,6 +26,8 @@
 //    self-contained (no vendored third-party dependency at all right now).
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -41,6 +42,8 @@
 #include "json.hpp"
 
 namespace {
+
+namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------
 // small utilities
@@ -85,6 +88,169 @@ std::vector<std::string> splitAll(const std::string& s, char sep) {
 		start = pos + 1;
 	}
 	return out;
+}
+
+bool endsWith(const std::string& s, const std::string& suffix) {
+	return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// ---------------------------------------------------------------------
+// top-level IO identity -- .xdc (PACKAGE_PIN <-> port name) + prjxray's
+// package_pins.csv (pin -> tile/site), the direct C++ port of
+// xc7-bitstream-tools's scripts/bit2gates.py own XDC handling. Only
+// PACKAGE_PIN<->port and pin->(tile,site) are needed here; no other XDC
+// constraint (IOSTANDARD, timing, ...) is parsed.
+// ---------------------------------------------------------------------
+
+std::map<std::string, std::string> parseXdcPins(const std::string& path) {
+	std::map<std::string, std::string> pinForPort;
+	std::ifstream f(path);
+	if (!f) throw std::runtime_error("cannot open xdc: " + path);
+	static const std::regex re(R"(set_property\s+PACKAGE_PIN\s+(\S+)\s+\[get_ports\s*(\{[^}]+\}|\S+)\])");
+	std::string line;
+	while (std::getline(f, line)) {
+		std::smatch m;
+		if (!std::regex_search(line, m, re)) continue;
+		std::string port = m[2].str();
+		if (port.size() >= 2 && port.front() == '{' && port.back() == '}') port = port.substr(1, port.size() - 2);
+		pinForPort[port] = m[1].str();
+	}
+	return pinForPort;
+}
+
+struct PortBit {
+	int idx;  // -1 for a scalar (non-bussed) port
+	std::string pin;
+};
+
+// base port name -> its bits (each either a scalar, idx==-1, or one bus bit)
+std::map<std::string, std::vector<PortBit>> busGroups(const std::map<std::string, std::string>& pinForPort) {
+	std::map<std::string, std::vector<PortBit>> groups;
+	static const std::regex bitRe(R"(^(.*)\[(\d+)\]$)");
+	for (auto& [name, pin] : pinForPort) {
+		std::smatch m;
+		if (std::regex_match(name, m, bitRe)) groups[m[1].str()].push_back({std::stoi(m[2].str()), pin});
+		else groups[name].push_back({-1, pin});
+	}
+	return groups;
+}
+
+std::string portLabel(const std::string& base, int idx) {
+	return idx < 0 ? base : base + "[" + std::to_string(idx) + "]";
+}
+
+struct PkgPin {
+	std::string tile, site;
+};
+
+std::map<std::string, PkgPin> loadPackagePins(const std::string& path) {
+	std::map<std::string, PkgPin> out;
+	std::ifstream f(path);
+	if (!f) throw std::runtime_error("cannot open package_pins.csv: " + path);
+	std::string line;
+	std::getline(f, line);  // header
+	while (std::getline(f, line)) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		auto cols = splitAll(line, ',');
+		if (cols.size() < 4) continue;
+		out[cols[0]] = {cols[3], cols[2]};  // pin -> (tile, site)
+	}
+	return out;
+}
+
+// package_pins.csv lives under the FULL part directory (chip+package+speed
+// grade, e.g. "xc7vx485tffg1761-2"), one level more specific than
+// --device's directory (tilegrid.json etc). If `part` already names that
+// exact directory, use it as-is; otherwise glob for any speed-grade variant
+// (pin/site layout is identical across speed grades of the same
+// chip+package).
+std::string resolvePartDir(const std::string& familyDir, const std::string& part) {
+	if (fs::is_directory(familyDir + "/" + part)) return part;
+	std::vector<std::string> matches;
+	if (fs::is_directory(familyDir)) {
+		for (auto& entry : fs::directory_iterator(familyDir)) {
+			std::string name = entry.path().filename().string();
+			if (name.rfind(part + "-", 0) == 0) matches.push_back(name);
+		}
+	}
+	if (matches.empty())
+		throw std::runtime_error("no package_pins directory matching " + part + "(-*) under " + familyDir);
+	std::sort(matches.begin(), matches.end());
+	return matches.front();
+}
+
+// Read the part name straight out of a .bit file's own header (key 'b') --
+// the part is a property of the bitstream itself, not something an
+// independent verification tool should need to be told out-of-band. Direct
+// C++ port of bit2gates.py's parse_bit_part(), same standard Xilinx .bit
+// TLV header (verified there against a real VC707 golden bitstream): a
+// 2-byte length + that many magic bytes, then every field is a key -- for
+// the first field only, itself a 2-byte length + that many bytes (always
+// just "a", i.e. field 'a' is doubly length-wrapped in real .bit files;
+// every later key is a single bare byte) -- followed by a 2-byte length and
+// that many bytes of value, until key 'e' (the raw bitstream payload,
+// which this function never reaches: it returns as soon as it sees 'b').
+//
+// Vivado does not record the speed grade in this field (only chip+package,
+// e.g. "7vx485tffg1761"), so the caller must still resolve which exact
+// "-N" package_pins.csv directory to use (see resolvePartDir()) -- pin and
+// site layout do not vary by speed grade, only timing does.
+std::string parseBitPart(const std::string& path) {
+	std::ifstream f(path, std::ios::binary);
+	if (!f) throw std::runtime_error("cannot open .bit: " + path);
+	std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+	auto need = [&](size_t pos, size_t n) {
+		if (pos + n > data.size())
+			throw std::runtime_error(".bit header truncated or not a Xilinx .bit file: " + path);
+	};
+	auto readU16 = [&](size_t pos) -> uint16_t {
+		need(pos, 2);
+		return (uint16_t)(((uint8_t)data[pos] << 8) | (uint8_t)data[pos + 1]);
+	};
+
+	size_t pos = 0;
+	uint16_t n = readU16(pos);
+	pos += 2 + n;  // skip the fixed magic block
+	uint16_t wrapLen = readU16(pos);
+	pos += 2;
+	need(pos, wrapLen);
+	std::string key = data.substr(pos, wrapLen);
+	pos += wrapLen;
+	while (key != "e") {
+		uint16_t flen = readU16(pos);
+		pos += 2;
+		need(pos, flen);
+		std::string val = data.substr(pos, flen);
+		pos += flen;
+		if (key == "b") {
+			while (!val.empty() && val.back() == '\0') val.pop_back();
+			if (val.rfind("xc", 0) != 0) val = "xc" + val;
+			return val;
+		}
+		need(pos, 1);
+		key = std::string(1, data[pos]);
+		pos += 1;
+	}
+	throw std::runtime_error("could not find part-name field ('b') in .bit header: " + path);
+}
+
+// IBUF_HP_BANK_GLUE/IBUFDS_BANK_GLUE unambiguously mark an input buffer, but
+// there is no equivalent "OBUF_..._BANK_GLUE" marker for a plain
+// single-ended output in this tile family. What IS unambiguous: an
+// output-configured site carries a DRIVE.<strength> feature (meaningless
+// for an input); an input-configured site carries a plain ".IN"/".IN_ONLY"
+// feature. Verified against every used IOB site in the validated Johnson
+// example: the two sets never overlap. Mirrors bit2gates.py's
+// classify_iob() exactly.
+std::string classifyIob(const std::set<std::string>& feat) {
+	if (feat.count("IBUFDS_BANK_GLUE")) return "ibufds";
+	for (auto& f : feat)
+		if (f.find(".DRIVE.") != std::string::npos || endsWith(f, ".DRIVE")) return "obuf";
+	if (feat.count("IBUF_HP_BANK_GLUE")) return "ibuf";
+	for (auto& f : feat)
+		if (endsWith(f, ".IN") || endsWith(f, ".IN_ONLY")) return "ibuf";
+	return "";
 }
 
 // ---------------------------------------------------------------------
@@ -430,6 +596,54 @@ class FasmDesign {
 		return sorted[ordinal]->pins;
 	}
 
+	// IOB18S/IOB18M (and similarly-paired site types) both report x_coord 0
+	// in the tile_type JSON -- sitePins()'s x_coord ranking can't tell them
+	// apart, and picking the wrong one silently swaps which physical wire an
+	// OBUF/IBUF resolves to. Use this instead whenever the real site type is
+	// already known (from the tilegrid, cross-referenced via a package pin).
+	std::map<std::string, std::string> sitePinsByType(const std::string& tileType, const std::string& siteType) {
+		const TileType& tt = db.tileType(tileType);
+		for (auto& s : tt.sites)
+			if (s.type == siteType) return s.pins;
+		return {};
+	}
+
+	// real site name -> FASM's "IOB_Y0"/"IOB_Y1" suffix. Fixed, silicon-level
+	// rule (verified against golden Vivado FASM, mirrors bit2gates.py's
+	// fasm_iob_suffix() exactly): a paired M/S tile's "M" (master) site is
+	// suffix Y0, "S" (slave) is Y1; a SING (single, unpaired) tile has
+	// exactly one site and it is always suffix Y1.
+	std::string fasmIobSuffix(const std::string& tile, const std::string& site) {
+		const auto& sites = db.tilegrid.at(tile).sites;
+		if (sites.size() == 1) return "IOB_Y1";
+		auto it = sites.find(site);
+		std::string styp = it != sites.end() ? it->second : "";
+		if (!styp.empty() && styp.back() == 'M') return "IOB_Y0";
+		if (!styp.empty() && styp.back() == 'S') return "IOB_Y1";
+		return "";
+	}
+
+	// FASM addresses a BUFGCTRL by a tile-LOCAL index ("BUFGCTRL_X0Y5"), not
+	// its real device-wide site name -- sort this tile's real BUFGCTRL sites
+	// by Y ascending, the local index selects directly into that list.
+	std::string bufgctrlRealSite(const std::string& tile, const std::string& fasmLocalSite) {
+		static const std::regex re(R"(^BUFGCTRL_X\d+Y(\d+)$)");
+		std::smatch m;
+		if (!std::regex_match(fasmLocalSite, m, re)) return "";
+		int localIdx = std::stoi(m[1].str());
+		std::vector<std::string> cands;
+		for (auto& [s, ty] : db.tilegrid.at(tile).sites)
+			if (ty == "BUFGCTRL") cands.push_back(s);
+		static const std::regex yRe(R"(Y(\d+)$)");
+		std::sort(cands.begin(), cands.end(), [](const std::string& a, const std::string& b) {
+			std::smatch ma, mb;
+			std::regex_search(a, ma, yRe);
+			std::regex_search(b, mb, yRe);
+			return std::stoi(ma[1].str()) < std::stoi(mb[1].str());
+		});
+		return localIdx < (int)cands.size() ? cands[localIdx] : "";
+	}
+
        private:
 	static bool endsWithAny(const std::string& s, std::initializer_list<const char*> suffixes) {
 		for (auto suf : suffixes) {
@@ -569,6 +783,7 @@ std::string ffType(bool sync, int srval, std::string& srPin) {
 
 int main(int argc, char** argv) {
 	std::string fasmPath, dbRoot, family, device, outPath, moduleName = "top";
+	std::string xdcPath, part, bitPath;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		auto need = [&](const char* flag) { return a == flag && i + 1 < argc; };
@@ -578,14 +793,32 @@ int main(int argc, char** argv) {
 		else if (need("--device")) device = argv[++i];
 		else if (need("--out")) outPath = argv[++i];
 		else if (need("--module")) moduleName = argv[++i];
+		else if (need("--xdc")) xdcPath = argv[++i];
+		else if (need("--part")) part = argv[++i];
+		else if (need("--bit")) bitPath = argv[++i];
 	}
 	if (fasmPath.empty() || dbRoot.empty() || family.empty() || device.empty() || outPath.empty()) {
 		std::cerr << "usage: fasm2netlist --fasm F --db PRJXRAY_DB --family FAMILY --device DEVICE --out OUT.v "
-		             "[--module NAME]\n"
-		             "  (--family/--device instead of --part for this first pass -- e.g. "
-		             "--family virtex7 --device xc7vx485t)\n";
+		             "[--module NAME] [--xdc DESIGN.xdc (--part PART | --bit DESIGN.bit)]\n"
+		             "  (--family/--device instead of --part for the fabric DB -- e.g. "
+		             "--family virtex7 --device xc7vx485t)\n"
+		             "  (--xdc together with --part or --bit enables top-level IO: IBUF/IBUFDS/OBUF/BUFG\n"
+		             "   resolution via the XDC's PACKAGE_PIN constraints + prjxray's package_pins.csv for\n"
+		             "   that part, e.g. --part xc7vx485tffg1761-2 -- or, if you don't already know the\n"
+		             "   exact part, --bit DESIGN.bit reads it straight out of that bitstream's own header\n"
+		             "   (speed grade isn't recorded there, but pin/site layout doesn't vary by speed grade\n"
+		             "   so this is still enough); without --xdc the module has no ports, as before)\n";
 		return 2;
 	}
+	if (!xdcPath.empty() && part.empty() && bitPath.empty()) {
+		std::cerr << "usage: --xdc also needs --part or --bit (top-level IO needs the exact part)\n";
+		return 2;
+	}
+	if (xdcPath.empty() && (!part.empty() || !bitPath.empty())) {
+		std::cerr << "usage: --part/--bit only matter together with --xdc (top-level IO)\n";
+		return 2;
+	}
+	if (part.empty() && !bitPath.empty()) part = parseBitPart(bitPath);
 
 	Database db(dbRoot, family, device);
 	FasmDesign fd(fasmPath, db);
@@ -751,6 +984,167 @@ int main(int argc, char** argv) {
 		                 "), .CE(" + ceNet + "), .D(" + dNet + "), ." + srPin + "(" + srNet + "), .Q(" + qNet + "));");
 	}
 
+	// ---- top-level IO: OBUF/IBUF/IBUFDS/BUFG, resolved purely from FASM site
+	// features (IBUF_HP_BANK_GLUE/OBUF_.../IBUFDS_BANK_GLUE, BUFGCTRL.*.IN_USE)
+	// at sites located via the .xdc's PACKAGE_PIN constraints + prjxray's
+	// package_pins.csv (pin -> tile/site) -- never from a placement/routed
+	// dump. The .xdc is also the sole source of the top-level port list
+	// itself. Direct C++ port of bit2gates.py's own IO section. Only runs
+	// when both --xdc and --part were given; otherwise the module has no
+	// ports, as before. ----
+	std::vector<std::string> portDecls;
+	std::string clkPortName, plainIbufOutNet;
+	if (!xdcPath.empty()) {
+		auto sitePin = [&](const std::string& tile, const std::string& ttype, int ordinal,
+		                    const std::string& pin) -> std::string {
+			auto pins = fd.sitePins(ttype, ordinal);
+			auto it = pins.find(pin);
+			return it != pins.end() ? fd.netOf(tile, it->second) : "";
+		};
+
+		auto pinForPort = parseXdcPins(xdcPath);
+		auto portBus = busGroups(pinForPort);
+		std::string partDir = resolvePartDir(db.family_dir, part);
+		auto pkgPins = loadPackagePins(db.family_dir + "/" + partDir + "/package_pins.csv");
+
+		struct Resolved {
+			std::string pin, tile, site;
+		};
+		std::map<std::pair<std::string, int>, Resolved> resolved;
+		for (auto& [base, bits] : portBus) {
+			for (auto& b : bits) {
+				auto pit = pkgPins.find(b.pin);
+				if (pit == pkgPins.end()) {
+					warnings.push_back("XDC port " + portLabel(base, b.idx) + ": package pin " + b.pin +
+					                    " not found in package_pins.csv");
+					continue;
+				}
+				resolved[{base, b.idx}] = {b.pin, pit->second.tile, pit->second.site};
+			}
+		}
+
+		std::map<std::pair<std::string, std::string>, std::pair<std::string, int>> siteToPortbit;
+		for (auto& [key, r] : resolved) siteToPortbit[{r.tile, r.site}] = key;
+
+		auto otherSite = [&](const std::string& tile, const std::string& site) -> std::string {
+			for (auto& [s, ty] : db.tilegrid.at(tile).sites)
+				if (s != site) return s;
+			return "";
+		};
+		auto featAt = [&](const std::string& tile, const std::string& site) -> std::set<std::string> {
+			std::string suffix = fd.fasmIobSuffix(tile, site);
+			if (suffix.empty()) return {};
+			auto it = fd.iob_feats.find({tile, suffix});
+			return it != fd.iob_feats.end() ? it->second : std::set<std::string>{};
+		};
+
+		// The N-leg's OWN features can incidentally look like a plain
+		// single-ended input; checking sibling-consumption FIRST is what
+		// stops it from ALSO getting its own independent IBUF.
+		std::map<std::pair<std::string, int>, std::string> portDir;
+		std::set<std::pair<std::string, int>> consumed;
+		for (auto& [key, r] : resolved) {
+			std::string sib = otherSite(r.tile, r.site);
+			std::set<std::string> sibFeat = sib.empty() ? std::set<std::string>{} : featAt(r.tile, sib);
+			std::set<std::string> myFeat = featAt(r.tile, r.site);
+			if (classifyIob(sibFeat) == "ibufds" && classifyIob(myFeat) != "ibufds") {
+				portDir[key] = "input";
+				consumed.insert(key);
+				continue;
+			}
+			std::string kind = classifyIob(myFeat);
+			if (kind == "ibuf" || kind == "ibufds") portDir[key] = "input";
+			else if (kind == "obuf") portDir[key] = "output";
+			else
+				warnings.push_back("IO port " + portLabel(key.first, key.second) + " (pin " + r.pin + ", " +
+				                    r.tile + "/" + r.site + "): no IBUF/OBUF/IBUFDS FASM marker found");
+		}
+
+		for (auto& [base, bits] : portBus) {
+			bool anyOutput = false;
+			int maxIdx = -1;
+			for (auto& b : bits) {
+				auto it = portDir.find({base, b.idx});
+				if (it != portDir.end() && it->second == "output") anyOutput = true;
+				if (b.idx > maxIdx) maxIdx = b.idx;
+			}
+			std::string direction = anyOutput ? "output" : "input";
+			if (bits.size() == 1 && bits[0].idx < 0) portDecls.push_back(direction + " " + base);
+			else portDecls.push_back(direction + " [" + std::to_string(maxIdx) + ":0] " + base);
+		}
+
+		for (auto& [key, r] : resolved) {
+			if (consumed.count(key)) continue;
+			std::set<std::string> feat = featAt(r.tile, r.site);
+			std::string ttype = db.tilegrid.at(r.tile).type;
+			std::string styp = db.tilegrid.at(r.tile).sites.at(r.site);
+			std::string pname = portLabel(key.first, key.second);
+			std::string inst = uniqName("io_" + vname(r.tile) + "_" + r.site);
+			std::string kind = classifyIob(feat);
+			if (kind == "ibufds") {
+				std::string sib = otherSite(r.tile, r.site);
+				auto sit = siteToPortbit.find({r.tile, sib});
+				if (sit == siteToPortbit.end()) {
+					warnings.push_back("IBUFDS at " + r.tile + "/" + r.site +
+					                    ": no XDC-constrained sibling (N-leg) port found");
+					continue;
+				}
+				std::string ibPname = portLabel(sit->second.first, sit->second.second);
+				auto pins = fd.sitePinsByType(ttype, styp);
+				auto pit = pins.find("I");
+				std::string oNet = pit != pins.end() ? fd.netOf(r.tile, pit->second) : "";
+				lines.push_back("  IBUFDS \\" + inst + " (.I(" + pname + "), .IB(" + ibPname + "), .O(" + oNet +
+				                 "));");
+				clkPortName = pname;
+			} else if (kind == "ibuf") {
+				auto pins = fd.sitePinsByType(ttype, styp);
+				auto pit = pins.find("I");
+				std::string oNet = pit != pins.end() ? fd.netOf(r.tile, pit->second) : "";
+				lines.push_back("  IBUF \\" + inst + " (.I(" + pname + "), .O(" + oNet + "));");
+				plainIbufOutNet = oNet;
+			} else if (kind == "obuf") {
+				auto pins = fd.sitePinsByType(ttype, styp);
+				auto pit = pins.find("O");
+				std::string iNet = pit != pins.end() ? fd.netOf(r.tile, pit->second) : "";
+				lines.push_back("  OBUF \\" + inst + " (.I(" + iNet + "), .O(" + pname + "));");
+			}
+			// unclassifiable ports were already warned about above.
+		}
+
+		// ---- BUFG/BUFGCTRL: found purely from FASM (BUFGCTRL.<local-site>.IN_USE) ----
+		for (auto& [key, feat] : fd.bufg_feats) {
+			const std::string& tile = key.first;
+			const std::string& localSite = key.second;
+			if (!feat.count("IN_USE")) continue;
+			const std::string& ttype = fd.used_tiles[tile];
+			std::string realSite = fd.bufgctrlRealSite(tile, localSite);
+			if (realSite.empty()) {
+				warnings.push_back("could not resolve real BUFGCTRL site for " + tile + "/" + localSite);
+				continue;
+			}
+			int ordinal = fd.siteOrdinal(tile, realSite);
+			std::string i0 = sitePin(tile, ttype, ordinal, "I0");
+			std::string o = sitePin(tile, ttype, ordinal, "O");
+			lines.push_back("  BUFG \\" + uniqName("bufg_" + vname(tile) + "_" + realSite) + " (.I(" + i0 +
+			                 "), .O(" + o + "));");
+		}
+
+		// ---- clock distribution tie-off ----
+		// The clock tree (GCLK/HROW/HCLK) has real buffering/muxing at
+		// multiple points -- treating it like ordinary point-to-point
+		// routing via the union-find is actively wrong (BUFG's I0 and O can
+		// end up unioned into ONE net via the long GCLK-mesh chain both
+		// legitimately pass through, silently shorting the buffer's input to
+		// its own output and freezing every register). Instead tie every
+		// SLICE clock net straight to the top-level clock port, bypassing
+		// the IBUFDS/BUFG/mesh reconstruction entirely.
+		if (!clkPortName.empty())
+			for (auto& n : clkNetsUsed) lines.push_back("  assign " + n + " = " + clkPortName + ";");
+		if (!plainIbufOutNet.empty())
+			for (auto& n : srNetsUsed)
+				if (n != plainIbufOutNet) lines.push_back("  assign " + n + " = " + plainIbufOutNet + ";");
+	}
+
 	// ---- tie off genuinely-unrouted nets (no IO/clock reconstruction in
 	// this pass -- see file header) ----
 	std::set<std::string> allWires;
@@ -768,9 +1162,15 @@ int main(int argc, char** argv) {
 	for (auto& n : allWires)
 		if (!driven.count(n)) lines.push_back("  assign " + n + " = 1'b0;");
 
+	std::string portList;
+	for (size_t i = 0; i < portDecls.size(); i++) {
+		if (i) portList += ", ";
+		portList += portDecls[i];
+	}
+
 	std::ofstream out(outPath);
 	out << "// AUTO-GENERATED by fasm2netlist (C++) -- anonymous bitstream-reconstructed netlist\n";
-	out << "module " << moduleName << "();\n";
+	out << "module " << moduleName << "(" << portList << ");\n";
 	for (auto& n : allWires) out << "  wire " << n << ";\n";
 	out << "\n";
 	for (auto& l : lines) out << l << "\n";
