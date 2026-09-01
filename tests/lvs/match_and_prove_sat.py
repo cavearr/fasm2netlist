@@ -142,6 +142,11 @@ class GoldNetlist:
     def ff_names(self):
         return [n for n, c in self.cells.items() if c['type'] in FF_TYPES]
 
+    def ff_flavour(self, cellname):
+        c = self.cells[cellname]
+        init = str(c.get('parameters', {}).get('INIT', '')).strip().lower()
+        return (c['type'], init[-1] if init else '?')
+
     def _pin_net(self, cell, pin):
         conns = cell['connections'].get(pin)
         if not conns:
@@ -302,6 +307,11 @@ class GateNetlist:
     def ff_names(self):
         return [n for n, c in self.cell_conns.items() if c['type'] in FF_TYPES]
 
+    def ff_flavour(self, cname):
+        c = self.cell_conns[cname]
+        init = (c.get('init') or '').strip().lower()   # e.g. "1'b1"
+        return (c['type'], init[-1] if init else '?')
+
     def _pin_net(self, cname, pin):
         return self.cell_conns[cname]['conns'].get(pin)
 
@@ -430,6 +440,51 @@ def match(z3mod, gold, gate, gold_ff, gate_ff, gold_cone, gate_cone, log):
                 method[g] = 'output-port-anchor (%s)' % label
     log('phase 1 (output-port anchors): %d matched' % len(matched_g2t))
 
+    # Phase 1b: flavour anchors.  A register's own flavour -- FDRE/FDSE/
+    # FDCE/FDPE plus its INIT -- is recovered on the gate side from the FF's
+    # own FASM features, so it is available with no placement and no solver.
+    # It is rarely discriminating on its own, but it is decisive exactly where
+    # topology is not: a counter that resets to a non-zero value has one
+    # set-flavoured bit among its reset-flavoured ones, and that one bit is a
+    # free, globally unique anchor into an otherwise symmetric shift chain.
+    # Anchors are hypotheses, not proofs -- phase 4 re-verifies them by miter
+    # once their dependencies resolve, and a wrong one is reported, not hidden.
+    flav_g, flav_t = defaultdict(list), defaultdict(list)
+    for g in gold_ff:
+        if g not in matched_g2t:
+            flav_g[gold.ff_flavour(g)].append(g)
+    for t in gate_ff:
+        if t not in matched_t2g:
+            flav_t[gate.ff_flavour(t)].append(t)
+    flavour_anchors = 0
+    for flav in sorted(set(flav_g) & set(flav_t)):
+        if len(flav_g[flav]) == 1 and len(flav_t[flav]) == 1:
+            g, t = flav_g[flav][0], flav_t[flav][0]
+            matched_g2t[g], matched_t2g[t] = t, g
+            method[g] = 'structural-hypothesis (unverified)'
+            flavour_anchors += 1
+    log('phase 1b (unique-flavour anchors): %d matched (%d total)' % (flavour_anchors, len(matched_g2t)))
+
+    # NOT worth re-trying: Weisfeiler-Leman colour refinement over the register
+    # graph, using who-reads-whom as well as what-is-read.  In principle that
+    # is what separates the stages of a tapped shift chain -- distance to the
+    # feedback tap is a positional fact fan-in alone cannot see -- and it does
+    # split all 36 registers into 36 singleton classes on each side here.  It
+    # is still useless, because the classes do not CORRESPOND: refinement can
+    # only relate two graphs that are isomorphic, and these two are not.  The
+    # LFSR's first stage has 2 distinct register refs in its cone on the gold
+    # side and 4 on the gate side (the bitstream's LUT decomposition drags in
+    # neighbours gold's does not), so its colour differs from the first round,
+    # and refinement then propagates that one disagreement to every register
+    # reachable from it -- which, in a ring, is all of them.  The same fact
+    # limits signature() itself: len(state_refs) is not as portable between
+    # the two decompositions as the note above it assumes.  Anchors that read
+    # only a register's OWN attributes (phase 1b) survive this; anything
+    # derived from cone shape does not.
+    def base_key(side, name):
+        cone = gold_cone if side == 'g' else gate_cone
+        return signature(cone[name])
+
     def try_confirm(glist, tlist):
         survivors = []
         for g in glist:
@@ -456,15 +511,15 @@ def match(z3mod, gold, gate, gold_ff, gate_ff, gold_cone, gate_cone, log):
                     survivors.append((g, t))
         return survivors
 
-    def readiness_round():
+    def readiness_round(key):
         progress = False
         ready_g = [g for g in gold_ff if g not in matched_g2t and gold_cone[g].state_refs <= matched_g2t.keys()]
         ready_t = [t for t in gate_ff if t not in matched_t2g and gate_cone[t].state_refs <= matched_t2g.keys()]
         groups_g, groups_t = defaultdict(list), defaultdict(list)
         for g in ready_g:
-            groups_g[signature(gold_cone[g])].append(g)
+            groups_g[key('g', g)].append(g)
         for t in ready_t:
-            groups_t[signature(gate_cone[t])].append(t)
+            groups_t[key('t', t)].append(t)
         for sig in sorted(set(groups_g) & set(groups_t)):
             glist, tlist = groups_g[sig], groups_t[sig]
             survivors = try_confirm(glist, tlist)
@@ -476,23 +531,19 @@ def match(z3mod, gold, gate, gold_ff, gate_ff, gold_cone, gate_cone, log):
                     progress = True
         return progress
 
-    rounds = 0
-    while readiness_round():
-        rounds += 1
-    log('phase 2 (readiness rounds, %d passes): %d matched total' % (rounds, len(matched_g2t)))
 
     # Phase 3: structural bootstrap for deadlocked clusters (e.g. a shift
     # chain with no primary-input-only base case -- see module docstring
     # for why a single globally-unique-signature seed is enough to unstick
     # the whole cascade via phase 2's readiness rounds).
-    def bootstrap_once():
+    def bootstrap_once(key):
         sig_g, sig_t = defaultdict(list), defaultdict(list)
         for g in gold_ff:
             if g not in matched_g2t:
-                sig_g[signature(gold_cone[g])].append(g)
+                sig_g[key('g', g)].append(g)
         for t in gate_ff:
             if t not in matched_t2g:
-                sig_t[signature(gate_cone[t])].append(t)
+                sig_t[key('t', t)].append(t)
         for sig in sorted(set(sig_g) & set(sig_t)):
             if len(sig_g[sig]) == 1 and len(sig_t[sig]) == 1:
                 g, t = sig_g[sig][0], sig_t[sig][0]
@@ -501,12 +552,15 @@ def match(z3mod, gold, gate, gold_ff, gate_ff, gold_cone, gate_cone, log):
                 return True
         return False
 
-    bootstraps = 0
-    while bootstrap_once():
+    rounds = bootstraps = 0
+    while readiness_round(base_key):
+        rounds += 1
+    while bootstrap_once(base_key):
         bootstraps += 1
-        while readiness_round():
-            pass
-    log('phase 3 (structural bootstraps): %d seed(s), %d matched total' % (bootstraps, len(matched_g2t)))
+        while readiness_round(base_key):
+            rounds += 1
+    log('phases 2-3: %d readiness passes, %d bootstrap seed(s), %d matched total' %
+        (rounds, bootstraps, len(matched_g2t)))
 
     # Phase 4: re-verify hypotheses whose own dependencies eventually
     # resolved via the cascade they triggered. Loop to a fixpoint: a
