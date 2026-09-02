@@ -352,7 +352,13 @@ int main(int argc, char **argv)
         }
         if (!bufg_outs.empty()) bufg_outs.resize(1);
     }
-    if (simple_clock && !bufg_outs.empty()) {
+    // Joining every slice clock to one BUFG is only sound when there is one
+    // BUFG.  A design with several has several clock domains, and merging
+    // them would say two registers share a clock when the bitstream says they
+    // do not -- a claim the checker would then happily prove.  With more than
+    // one, the routing has to answer the question instead.
+    bool one_clock = bufg_outs.size() == 1;
+    if (simple_clock && one_clock) {
         for (const auto &kv : dc.slices) {
             auto ti = tiles.find(kv.second.tile);
             if (ti == tiles.end()) continue;
@@ -415,7 +421,7 @@ int main(int argc, char **argv)
     // With the tree simplified, the clock net's own routing features -- real
     // and pseudo alike -- drive it from pieces of a path we have replaced.
     std::string clock_root;
-    if (simple_clock && !bufg_outs.empty()) {
+    if (simple_clock && one_clock) {
         clock_root = dsu.find(bufg_outs.front());
         std::vector<std::pair<std::string, std::string>> kept;
         for (const auto &a : assigns)
@@ -481,6 +487,65 @@ int main(int argc, char **argv)
             named++;
         }
         std::cerr << "  placement: labelled " << named << " of " << rm.mapped << " registers\n";
+    }
+
+    // ---- I/O logic: the bypass between the fabric and a pad ---------------
+    // A design that wants a plain output still has to configure the OLOGIC
+    // site sitting in the way, and what it configures is a pass-through:
+    // OMUX picking D1, OQ used on the way out.  Without this the pad's net
+    // has no driver at all and every bus-shaped output reads as a free
+    // variable -- which is what made nextpnr's arty example's twelve LEDs
+    // differ while all thirty of its registers proved.
+    {
+        // Most of these paths the database already declares hardwired: the
+        // OLOGIC bypass is a pseudo-PIP, so it arrives with the routing.  The
+        // ILOGIC one is not in the database at all, and without it an input
+        // pad's net stops at the site boundary.  Emitting a connection that
+        // already exists would leave the net with two drivers, so only what
+        // is missing is added.
+        std::set<std::string> already;
+        for (const auto &a : assigns)
+            already.insert(a.first);
+        int bypassed = 0, unmodelled_io = 0, hardwired = 0;
+        for (const auto &kv : dc.iologic) {
+            const IoLogicConfig &io = kv.second;
+            auto ti = tiles.find(io.tile);
+            if (ti == tiles.end()) continue;
+            load_type(ti->second.type);
+            // The FASM names the site by a Y index and the tile type names
+            // its pins after the same index, but the two orders do not agree
+            // (the tile's X0Y0 site carries the OLOGIC1 pins), so the wire
+            // name is what the two are matched on.
+            std::string want = std::string(io.is_output ? "OLOGIC" : "ILOGIC") +
+                               io.site.substr(io.site.size() - 1) + "_";
+            const char *dst_pin = io.is_output ? "OQ" : "O";
+            const char *src_pin = io.is_output ? "D1" : "D";
+            for (const auto &pins : site_pins[ti->second.type]) {
+                auto d = pins.find(dst_pin), sp = pins.find(src_pin);
+                if (d == pins.end() || sp == pins.end()) continue;
+                if (d->second.find(want) == std::string::npos) continue;
+                if (io.is_bypass()) {
+                    std::string dst = tw(io.tile, d->second);
+                    if (already.count(dst)) {
+                        hardwired++;
+                    } else {
+                        assigns.push_back({dst, tw(io.tile, sp->second)});
+                        already.insert(dst);
+                        bypassed++;
+                    }
+                } else {
+                    unmodelled_io++;
+                }
+                break;
+            }
+        }
+        if (!dc.iologic.empty()) {
+            std::cerr << "  I/O logic: " << bypassed << " pass-through added, " << hardwired
+                      << " already hardwired";
+            if (unmodelled_io)
+                std::cerr << ", " << unmodelled_io << " doing more than a wire (not modelled)";
+            std::cerr << "\n";
+        }
     }
 
     // One place decides how a net is written: its XDC name where it has one,
@@ -769,9 +834,12 @@ endmodule
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
     os << "\n" << body.str() << "endmodule\n";
 
-    if (simple_clock)
+    if (simple_clock && one_clock)
         std::cerr << "  clock tree simplified: " << clocked << " slice clocks joined to "
-                  << bufg_outs.size() << " BUFG output(s)\n";
+                  << bufg_outs.size() << " BUFG output\n";
+    else if (simple_clock && bufg_outs.size() > 1)
+        std::cerr << "  " << bufg_outs.size() << " BUFG outputs: clock tree left to the routing,"
+                  << " since one clock per design is what the simplification assumes\n";
     std::cerr << "tileverilog: " << dc.slices.size() << " slices, " << inst << " column instances, "
               << assigns.size() << " routing assigns, " << roots.size() << " nets\n";
     if (unmodelled) std::cerr << "  " << unmodelled << " slice features not modelled (see tiledump --gaps)\n";

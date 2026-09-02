@@ -88,6 +88,10 @@ std::optional<uint64_t> parse_bits(const std::string &v)
 }
 
 bool is_slice_site(const std::string &s) { return s.rfind("SLICEM_", 0) == 0 || s.rfind("SLICEL_", 0) == 0; }
+bool is_iologic_site(const std::string &s)
+{
+    return s.rfind("OLOGIC_Y", 0) == 0 || s.rfind("ILOGIC_Y", 0) == 0;
+}
 
 // tile type from the tile name: CLBLM_R_X31Y135 -> CLBLM_R
 std::string tile_type_of(const std::string &tile)
@@ -129,6 +133,23 @@ DesignConfig read_fasm(const std::string &path)
         auto parts = split(feature, '.');
         if (parts.size() < 2) { dc.unhandled.push_back(feature); continue; }
         const std::string &tile = parts[0];
+
+        if (parts.size() >= 3 && is_iologic_site(parts[1])) {
+            IoLogicConfig &io = dc.iologic[tile + "/" + parts[1]];
+            io.tile = tile;
+            io.tile_type = tile_type_of(tile);
+            io.site = parts[1];
+            io.is_output = parts[1][0] == 'O';
+            std::string rest = feature.substr(tile.size() + parts[1].size() + 2);
+            if (rest == "OQUSED") io.oq_used = true;
+            else if (rest.rfind("OMUX.", 0) == 0) io.omux = rest.substr(5);
+            else if (rest == "ZINV_D") io.d_inverted = false;
+            // The tristate path is not the data path: a pad driven all the
+            // time still configures it, and BUF is that "always on" setting.
+            else if (rest == "OSERDES.DATA_RATE_TQ.BUF") {}
+            else io.unhandled.push_back(rest);
+            continue;
+        }
 
         if (parts.size() < 3 || !is_slice_site(parts[1])) {
             // routing PIPs and non-slice site config: kept verbatim, decoded

@@ -73,9 +73,33 @@ struct SliceConfig
     std::vector<std::string> unhandled;  // features this decoder does not model
 };
 
+// One OLOGIC or ILOGIC site: the register that sits between the fabric and a
+// pad.  A design that only wants a wire still has to configure it, and what it
+// configures is a bypass -- OMUX selecting D1 with OQ used on the way out, or
+// an ILOGIC with nothing on the path but the optional inversion.  Anything
+// else on these sites (a real output register, DDR, a SERDES, a delay in the
+// data path) changes what the pad does and is reported rather than guessed at.
+struct IoLogicConfig
+{
+    std::string tile, tile_type, site;   // e.g. RIOI3_X43Y61, OLOGIC_Y1
+    bool is_output = false;              // OLOGIC (out) or ILOGIC (in)
+    bool oq_used = false;                // OQUSED: the pad is driven from OQ
+    std::string omux;                    // what OMUX selects, "" if unset
+    bool d_inverted = true;              // ILOGIC: ZINV_D clears this
+    std::vector<std::string> unhandled;  // anything implying more than a wire
+
+    // True when this site is a plain connection and nothing more.
+    bool is_bypass() const
+    {
+        if (!unhandled.empty()) return false;
+        return is_output ? (oq_used && omux == "D1") : !d_inverted;
+    }
+};
+
 struct DesignConfig
 {
     std::map<std::string, SliceConfig> slices;      // key: tile + "/" + site
+    std::map<std::string, IoLogicConfig> iologic;   // key: tile + "/" + site
     std::map<std::string, std::vector<std::string>> other_tiles; // tile -> features
     std::vector<std::string> unhandled;
 
