@@ -167,7 +167,10 @@ int main(int argc, char **argv)
         std::ifstream xf(xdc_path);
         // `set_property PACKAGE_PIN <pin> [get_ports <name>]`, plain or -dict,
         // with the port optionally braced: {led[0]} keeps its subscript.
-        static const std::regex re(R"((?:PACKAGE_PIN|LOC)\s+(\S+).*?get_ports\s*(?:\{\s*([^\}]+?)\s*\}|([^\]\s]+)))");
+        // The port name may be braced ({led[0]}) or bare (led[0]).  Bare, it
+        // can still carry a bus index, so a complete [digits] group is part of
+        // the name while a lone ] closes the [get_ports ...] around it.
+        static const std::regex re(R"((?:PACKAGE_PIN|LOC)\s+(\S+).*?get_ports\s*(?:\{\s*([^\}]+?)\s*\}|((?:[^\[\]\s]|\[\d+\])+)))");
         while (std::getline(xf, line)) {
             std::smatch m;
             if (!std::regex_search(line, m, re)) continue;
