@@ -537,56 +537,55 @@ int main(int argc, char **argv)
     }
 
     // ---- I/O logic: the bypass between the fabric and a pad ---------------
-    // A design that wants a plain output still has to configure the OLOGIC
-    // site sitting in the way, and what it configures is a pass-through:
-    // OMUX picking D1, OQ used on the way out.  Without this the pad's net
-    // has no driver at all and every bus-shaped output reads as a free
-    // variable -- which is what made nextpnr's arty example's twelve LEDs
-    // differ while all thirty of its registers proved.
+    // A pad has an OLOGIC or ILOGIC site in the way, and a design that wants a
+    // plain wire needs it to pass straight through.  Configuring nothing IS
+    // that state: nextpnr's hp-diffio routes an input through an ILOGIC whose
+    // site carries no bits at all, so keying this off the site's features
+    // would miss it entirely.  What marks the site as used is the routing --
+    // something drives D and something reads O -- so that is the test.
+    //
+    // The output half the database already declares hardwired as a
+    // pseudo-PIP; the input half is in no database here.  Only what is
+    // missing is added, or the net ends up with two drivers.
     {
-        // Most of these paths the database already declares hardwired: the
-        // OLOGIC bypass is a pseudo-PIP, so it arrives with the routing.  The
-        // ILOGIC one is not in the database at all, and without it an input
-        // pad's net stops at the site boundary.  Emitting a connection that
-        // already exists would leave the net with two drivers, so only what
-        // is missing is added.
         std::set<std::string> already;
         for (const auto &a : assigns)
             already.insert(a.first);
         int bypassed = 0, unmodelled_io = 0, hardwired = 0;
-        for (const auto &kv : dc.iologic) {
-            const IoLogicConfig &io = kv.second;
-            auto ti = tiles.find(io.tile);
+        for (const auto &tkv : dc.other_tiles) {
+            auto ti = tiles.find(tkv.first);
             if (ti == tiles.end()) continue;
             load_type(ti->second.type);
-            // The FASM names the site by a Y index and the tile type names
-            // its pins after the same index, but the two orders do not agree
-            // (the tile's X0Y0 site carries the OLOGIC1 pins), so the wire
-            // name is what the two are matched on.
-            std::string want = std::string(io.is_output ? "OLOGIC" : "ILOGIC") +
-                               io.site.substr(io.site.size() - 1) + "_";
-            const char *dst_pin = io.is_output ? "OQ" : "O";
-            const char *src_pin = io.is_output ? "D1" : "D";
             for (const auto &pins : site_pins[ti->second.type]) {
-                auto d = pins.find(dst_pin), sp = pins.find(src_pin);
-                if (d == pins.end() || sp == pins.end()) continue;
-                if (d->second.find(want) == std::string::npos) continue;
-                if (io.is_bypass()) {
-                    std::string dst = tw(io.tile, d->second);
-                    if (already.count(dst)) {
-                        hardwired++;
-                    } else {
-                        assigns.push_back({dst, tw(io.tile, sp->second)});
-                        already.insert(dst);
-                        bypassed++;
+                // ILOGIC receives on D and presents O; OLOGIC takes D1 and
+                // drives OQ.  A site with neither pair is not I/O logic.
+                for (int out = 0; out < 2; out++) {
+                    auto d = pins.find(out ? "OQ" : "O");
+                    auto sp = pins.find(out ? "D1" : "D");
+                    if (d == pins.end() || sp == pins.end()) continue;
+                    const std::string &owire = d->second;
+                    std::string tag = out ? "OLOGIC" : "ILOGIC";
+                    auto at = owire.find(tag);
+                    if (at == std::string::npos) continue;
+
+                    // the site's FASM name carries the same index its wires do
+                    std::string idx = owire.substr(at + tag.size(), 1);
+                    auto cfg = dc.iologic.find(tkv.first + "/" + tag + "_Y" + idx);
+                    if (cfg != dc.iologic.end() && !cfg->second.is_bypass()) {
+                        unmodelled_io++;
+                        continue;
                     }
-                } else {
-                    unmodelled_io++;
+
+                    std::string dst = tw(tkv.first, owire), src = tw(tkv.first, sp->second);
+                    if (already.count(dst)) { hardwired++; continue; }
+                    if (!already.count(src)) continue;   // nothing drives it: unused
+                    assigns.push_back({dst, src});
+                    already.insert(dst);
+                    bypassed++;
                 }
-                break;
             }
         }
-        if (!dc.iologic.empty()) {
+        if (bypassed || hardwired || unmodelled_io) {
             std::cerr << "  I/O logic: " << bypassed << " pass-through added, " << hardwired
                       << " already hardwired";
             if (unmodelled_io)
@@ -841,6 +840,35 @@ endmodule
         railed += rail.count(t) != 0;
 
     // a port keeps the design's own name where the XDC gave one
+    std::map<std::string, std::string> root_of;   // sanitised name -> its net root
+    for (const auto &r : roots) root_of[sanitise(r)] = r;
+
+    // A bidirectional pad reaches the fabric as two separate nets -- one the
+    // design drives, one it reads -- and the constraints give both the same
+    // name.  Sharing a name fuses them, and the extraction then claims the
+    // design reads back exactly what it drives, which is only true while the
+    // pad is not tri-stated.  The synthesis makes no such claim: its IOBUFDS
+    // presents whatever is on the pad.  So the receiving side keeps the name
+    // and the driving side keeps its own, which leaves the two sides of the
+    // comparison making the same assumption.
+    {
+        std::map<std::string, std::string> port_named;
+        for (const auto &n : ports) {
+            auto f = friendly.find(root_of[n]);
+            if (f != friendly.end()) port_named[f->second] = n;
+        }
+        int split = 0;
+        for (const auto &n : outs) {
+            auto f = friendly.find(root_of[n]);
+            if (f == friendly.end() || !port_named.count(f->second)) continue;
+            friendly.erase(f);
+            split++;
+        }
+        if (split)
+            std::cerr << "  " << split << " bidirectional pad(s): the name follows what the design"
+                      << " reads, since what it drives is not what it must read back\n";
+    }
+
     std::vector<std::string> port_decl, out_decl;
     std::map<std::string, std::string> emit_as;
     for (const auto &r : roots) {
@@ -850,16 +878,44 @@ endmodule
     }
     for (const auto &n : ports) port_decl.push_back(emit_as.count(n) ? emit_as[n] : n);
     for (const auto &n : outs) out_decl.push_back(emit_as.count(n) ? emit_as[n] : n);
+    // A bidirectional pad is reached from two sides -- something in the fabric
+    // drives it and something else reads it back -- and the constraints give
+    // both the same name.  Declared twice it is not Verilog at all, so it is
+    // declared once, as the inout it is, and named so the reader knows the
+    // two directions are not the same net here.
+    std::vector<std::string> inout_decl;
+    {
+        std::set<std::string> as_out(out_decl.begin(), out_decl.end());
+        std::vector<std::string> kept;
+        for (const auto &n : port_decl) {
+            if (as_out.count(n)) inout_decl.push_back(n);
+            else kept.push_back(n);
+        }
+        port_decl.swap(kept);
+        if (!inout_decl.empty()) {
+            std::vector<std::string> keep_out;
+            std::set<std::string> bidir(inout_decl.begin(), inout_decl.end());
+            for (const auto &n : out_decl)
+                if (!bidir.count(n)) keep_out.push_back(n);
+            out_decl.swap(keep_out);
+            std::cerr << "  " << inout_decl.size() << " bidirectional pad(s): what the design"
+                      << " reads back is whatever is on the pad, not what it drives\n";
+        }
+    }
     os << "// " << dsu.parent.size() << " (tile,wire) endpoints -> " << roots.size()
        << " nets, joined by " << joins << " tileconn pairs\n"
        << "// " << ports.size() << " inputs, " << outs.size() << " outputs, "
        << (tied.size() - size_t(railed)) << " undriven nets at the interconnect pull-up, "
        << railed << " held at a GND/VCC rail\n"
        << "module fabric (\n";
-    for (size_t i = 0; i < ports.size(); i++)
-        os << "  input wire " << port_decl[i] << (i + 1 < ports.size() || !outs.empty() ? ",\n" : "\n");
-    for (size_t i = 0; i < outs.size(); i++)
-        os << "  output wire " << out_decl[i] << (i + 1 < outs.size() ? ",\n" : "\n");
+    for (size_t i = 0; i < port_decl.size(); i++)
+        os << "  input wire " << port_decl[i]
+           << (i + 1 < port_decl.size() || !out_decl.empty() || !inout_decl.empty() ? ",\n" : "\n");
+    for (size_t i = 0; i < out_decl.size(); i++)
+        os << "  output wire " << out_decl[i]
+           << (i + 1 < out_decl.size() || !inout_decl.empty() ? ",\n" : "\n");
+    for (size_t i = 0; i < inout_decl.size(); i++)
+        os << "  inout wire " << inout_decl[i] << (i + 1 < inout_decl.size() ? ",\n" : "\n");
     os << ");\n";
     std::set<std::string> is_port(ports.begin(), ports.end());
     is_port.insert(outs.begin(), outs.end());

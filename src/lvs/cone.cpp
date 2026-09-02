@@ -9,6 +9,13 @@ namespace {
 
 const std::set<std::string> FF_TYPES = {"FDRE", "FDSE", "FDCE", "FDPE"};
 const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "BUFG", "IBUFDS", "OBUFDS"};
+// A bidirectional buffer's O pin carries what the pad is receiving, which
+// comes from the pad and not from anything inside the design.  Treating it as
+// a connection to the IO pin lets it resolve to the port the constraints name,
+// the same way an IBUF's O does.  The drive direction is a different question:
+// what the design puts ON the pad is gated by T, and a tri-stated pad does not
+// hold a boolean value, so an inout is not compared as an output.
+const std::map<std::string, std::string> BIDIR_RECEIVE = {{"IOBUF", "IO"}, {"IOBUFDS", "IO"}};
 
 // The tile model emitted by tileverilog.  One CLB column: a 6-input LUT read
 // two ways, a main flip-flop, a second flip-flop, and the output mux.  Its
@@ -176,7 +183,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (inst.type == "LUT6_2" && (pin.name == "O6" || pin.name == "O5")) ||
                           (inst.type.rfind("LUT", 0) == 0 && inst.type != "LUT6_2" && pin.name == "O") ||
                           (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
-                          (inst.type == "INV" && pin.name == "O");
+                          (inst.type == "INV" && pin.name == "O") ||
+                          (BIDIR_RECEIVE.count(inst.type) && pin.name == "O");
             if (!is_out)
                 continue;
             std::string n;
@@ -263,6 +271,12 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
 
     if (inst.type == "INV")
         return negate(in("I"));
+
+    {
+        auto bd = BIDIR_RECEIVE.find(inst.type);
+        if (bd != BIDIR_RECEIVE.end() && pin == "O")
+            return in(bd->second.c_str());
+    }
 
     if (inst.type == "CARRY4") {
         // Four stages of the same cell.  The carry into the chain is CYINIT
