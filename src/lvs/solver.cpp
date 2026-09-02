@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -45,13 +46,24 @@ Result run_solver(const Solver &solver, const std::string &text)
 
     std::string cmd = solver.command + " " + path.string() + " 2>/dev/null";
     std::string output;
+    int status = -1;
     if (FILE *pipe = ::popen(cmd.c_str(), "r")) {
         std::array<char, 4096> buf;
         while (std::fgets(buf.data(), int(buf.size()), pipe))
             output += buf.data();
-        ::pclose(pipe);
+        status = ::pclose(pipe);
     }
     fs::remove(path);
+
+    // A solver that is not installed says nothing, and saying nothing reads
+    // as "could not decide" -- so a machine with no solver on it reports every
+    // register unknown and looks exactly like a proof that did not go
+    // through.  The shell says 127 when it cannot find the command; that is a
+    // setup fault, not a result, and it is worth failing loudly over.
+    if (status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 127)
+        throw std::runtime_error("solver not found: '" + solver.command +
+                                 "'. Install it, or pass --solver with one that exists"
+                                 " (a build linked against libz3 defaults to --solver libz3).");
 
     // Both answer conventions in one pass: SAT solvers print "s SATISFIABLE",
     // SMT solvers print "sat".  Check unsat first -- "sat" is a substring of

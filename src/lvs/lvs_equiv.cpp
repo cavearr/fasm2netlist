@@ -49,7 +49,7 @@ std::string emit(const BoolNet &net, Lit target, Format fmt)
 
 } // namespace
 
-int main(int argc, char **argv)
+static int run(int argc, char **argv)
 {
     std::string gold_path, gate_path, top = "top", gold_top, gate_top, dump_prefix, map_path;
     std::vector<std::pair<std::string, std::string>> compare;   // arbitrary net pairs
@@ -234,4 +234,16 @@ int main(int argc, char **argv)
         std::cout << "undriven nets treated as free: " << gold.free_nets().size() << " gold, "
                   << gate.free_nets().size() << " gate\n";
     return differ == 0 && unknown == 0 ? 0 : 1;
+}
+
+// A setup fault -- no solver on the machine, an unreadable database -- is not
+// a verdict about the design, and must not be printed as one.
+int main(int argc, char **argv)
+{
+    try {
+        return run(argc, argv);
+    } catch (const std::exception &e) {
+        std::cerr << "lvs_equiv: " << e.what() << "\n";
+        return 2;
+    }
 }
