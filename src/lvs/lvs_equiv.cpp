@@ -18,6 +18,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -28,8 +29,12 @@ namespace {
 void usage()
 {
     std::cerr << "usage: lvs_equiv --gold <a.v> --gate <b.v> [--top NAME]\n"
-                 "                 [--solver 'cmd'] [--format dimacs|smt2]\n"
-                 "                 [--dump-prefix PATH] [--quiet]\n";
+                 "                 [--solver libz3|'cmd'] [--format dimacs|smt2]\n"
+                 "                 [--dump-prefix PATH] [--quiet]\n"
+                 "\n"
+                 "  --solver libz3  the linked library, one incremental session"
+              << (have_linked_z3() ? " (default)\n" : " -- NOT IN THIS BUILD\n")
+              << "  --solver <cmd>  any binary reading the chosen format, run per question\n";
 }
 
 std::string emit(const BoolNet &net, Lit target, Format fmt)
@@ -49,7 +54,7 @@ int main(int argc, char **argv)
     std::string gold_path, gate_path, top = "top", gold_top, gate_top, dump_prefix, map_path;
     std::vector<std::pair<std::string, std::string>> compare;   // arbitrary net pairs
     std::string placement_p, gold_json_p, db, device;
-    Solver solver = Solver::z3();
+    Solver solver{have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
     bool quiet = false;
 
     for (int i = 1; i < argc; i++) {
@@ -169,21 +174,25 @@ int main(int argc, char **argv)
               << " gate, " << common.size() << " matched by name\n";
     if (common.size() != gold.states().size() || common.size() != gate.states().size())
         std::cout << "  (unmatched registers are skipped -- their cones are not comparable)\n";
-    std::cout << "solver: " << solver.command << " ("
-              << (solver.format == Format::Dimacs ? "DIMACS" : "SMT-LIB2") << ")\n\n";
+    // One session for the whole run: both designs' cones live in `net`, and a
+    // solver told that once can keep what it learns from one register to the
+    // next instead of meeting the same network again per question.
+    std::unique_ptr<Session> session = make_session(net, solver);
+    std::cout << "solver: " << session->describe() << "\n\n";
 
     int proved = 0, differ = 0, unknown = 0;
     auto t0 = std::chrono::steady_clock::now();
 
     auto check = [&](const std::string &label, Lit a, Lit b) {
         Lit miter = net.mk_xor(a, b);
-        std::string text = emit(net, miter, solver.format);
         if (!dump_prefix.empty()) {
+            // the same question in a form another solver can be handed
             std::string safe = label;
             for (char &c : safe) if (!isalnum(c)) c = '_';
-            std::ofstream(dump_prefix + safe + (solver.format == Format::Dimacs ? ".cnf" : ".smt2")) << text;
+            std::ofstream(dump_prefix + safe + (solver.format == Format::Dimacs ? ".cnf" : ".smt2"))
+                << emit(net, miter, solver.format);
         }
-        Result r = run_solver(solver, text);
+        Result r = session->check(miter);
         if (r == Result::Unsat) { proved++; if (!quiet) std::cout << "  proved  " << label << "\n"; }
         else if (r == Result::Sat) { differ++; std::cout << "  DIFFER  " << label << "\n"; }
         else { unknown++; std::cout << "  unknown " << label << "\n"; }

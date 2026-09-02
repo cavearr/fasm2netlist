@@ -5,9 +5,13 @@
 #ifndef LVS_SOLVER_HPP
 #define LVS_SOLVER_HPP
 
+#include <memory>
 #include <string>
 
 namespace lvs {
+
+class BoolNet;
+using Lit = uint32_t;
 
 enum class Format
 {
@@ -38,6 +42,40 @@ struct Solver
 // stdout.  Recognises both the SAT-competition ("s SATISFIABLE") and SMT-LIB
 // ("sat") answer conventions, so one parser covers both formats.
 Result run_solver(const Solver &solver, const std::string &text);
+
+// One solver, many questions about one network.
+//
+// An LVS run asks the same shape of question once per register: is THIS
+// literal of the shared network satisfiable?  The network itself -- both
+// designs' logic, and everything the two have in common -- is the same every
+// time, so a session states it once and asks each question as an assumption
+// on top.  That is what the file-per-question route cannot do: it re-states
+// the whole problem, and the solver re-reads it, for every register.
+//
+// The network may grow between calls (cones are built on demand), and a
+// session picks up whatever has been added since it last looked.
+class Session
+{
+  public:
+    virtual ~Session() = default;
+    // Satisfiable => Sat, and the two sides differ; unsatisfiable => Unsat,
+    // and they agree for every assignment.
+    virtual Result check(Lit lit) = 0;
+    // What to print when saying which solver produced the answer.
+    virtual std::string describe() const = 0;
+};
+
+// A session over `net`, which must outlive it.  Uses the linked library when
+// `solver.command` names one and this build has it; otherwise re-serialises
+// the network per question and runs the command, which is always available.
+std::unique_ptr<Session> make_session(const BoolNet &net, const Solver &solver);
+
+// Whether this build can make a linked session at all, for the usage text
+// and for choosing a default.
+bool have_linked_z3();
+
+// The name that selects the linked library rather than an external binary.
+inline const char *linked_z3_name() { return "libz3"; }
 
 const char *to_string(Result r);
 

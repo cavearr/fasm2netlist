@@ -33,6 +33,26 @@ add_library(lvs_miter STATIC src/lvs/boolnet.cpp src/lvs/solver.cpp)
 target_compile_options(lvs_miter PRIVATE -Wall -Wextra)
 target_include_directories(lvs_miter PUBLIC src)
 
+# Z3 as a library rather than a command, when it is installed to be linked
+# against.  It is not required: without it every solver is still reachable as
+# a command, just a process and a re-parse per question.  Set LVS_Z3=OFF to
+# build the command-only way deliberately.
+option(LVS_Z3 "Link Z3 when it is available" ON)
+if(LVS_Z3)
+  find_path(Z3_INCLUDE_DIR z3++.h)
+  find_library(Z3_LIBRARY NAMES z3)
+  if(Z3_INCLUDE_DIR AND Z3_LIBRARY)
+    target_include_directories(lvs_miter PUBLIC ${Z3_INCLUDE_DIR})
+    target_link_libraries(lvs_miter PUBLIC ${Z3_LIBRARY})
+    target_compile_definitions(lvs_miter PUBLIC LVS_HAVE_Z3)
+    message(STATUS "lvs: linking ${Z3_LIBRARY}")
+  else()
+    message(STATUS "lvs: no libz3 found; solvers will be run as commands")
+  endif()
+else()
+  message(STATUS "lvs: LVS_Z3=OFF; solvers will be run as commands")
+endif()
+
 # Structural Verilog reader, generated from src/lvs/verilog.{l,y}.  flex and
 # bison are code generators, not link-time dependencies -- the sources they
 # emit are self-contained C++ -- so this keeps the "no external libraries"

@@ -7,10 +7,11 @@
 // (already-matched) register symbols.  So the miter is a pure Boolean formula,
 // and the solver is replaceable rather than structural: emit DIMACS CNF and
 // any SAT solver will take it; emit SMT-LIB 2 and any SMT solver will.  Z3
-// reads both, so nothing here is a new dependency -- it is the same solver
-// reached through a standard file format instead of a linked API, which is
-// what makes trying CaDiCaL, Kissat, cryptominisat or cvc5 a command-line
-// change rather than a code change.
+// reads both, so writing a file costs nothing in dependencies and makes
+// trying CaDiCaL, Kissat, cryptominisat or cvc5 a command-line change rather
+// than a code change.  Solving is nonetheless driven through the incremental
+// interface in solver.hpp: this network is shared by every query, and a
+// solver that can be told so once beats one re-reading it per question.
 #ifndef LVS_BOOLNET_HPP
 #define LVS_BOOLNET_HPP
 
@@ -106,6 +107,11 @@ class BoolNet
     }
 
     const std::map<uint32_t, AndNode> &ands() const { return ands_; }
+    // Nodes are numbered as they are created and never renumbered, so a
+    // consumer that has already dealt with the first N can resume from there
+    // when the network grows -- which it does, cone by cone, as the caller
+    // asks about more of the design.
+    uint32_t node_count() const { return next_node_; }
     const std::vector<std::string> &input_order() const { return input_order_; }
     Lit input_lit(const std::string &name) const { return inputs_.at(name); }
 
