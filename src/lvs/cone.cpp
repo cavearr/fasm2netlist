@@ -1,0 +1,521 @@
+#include "lvs/cone.hpp"
+
+#include <cstdlib>
+#include <stdexcept>
+
+namespace lvs {
+
+namespace {
+
+const std::set<std::string> FF_TYPES = {"FDRE", "FDSE", "FDCE", "FDPE"};
+const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "BUFG", "IBUFDS", "OBUFDS"};
+// A bidirectional buffer's O pin carries what the pad is receiving, which
+// comes from the pad and not from anything inside the design.  Treating it as
+// a connection to the IO pin lets it resolve to the port the constraints name,
+// the same way an IBUF's O does.  The drive direction is a different question:
+// what the design puts ON the pad is gated by T, and a tri-stated pad does not
+// hold a boolean value, so an inout is not compared as an output.
+const std::map<std::string, std::string> BIDIR_RECEIVE = {{"IOBUF", "IO"}, {"IOBUFDS", "IO"}};
+
+// The tile model emitted by tileverilog.  One CLB column: a 6-input LUT read
+// two ways, a main flip-flop, a second flip-flop, and the output mux.  Its
+// selects arrive as string parameters, exactly as the FASM decoded them.
+bool is_xcol(const std::string &t) { return t == "xcol"; }
+std::string param_str(const Instance &i, const std::string &n, const std::string &dflt)
+{
+    auto v = i.param(n);
+    if (!v) return dflt;
+    std::string s = *v;
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+    return s;
+}
+
+// A LUT INIT as written in the netlist: 64'hf0f0..., 16'b0000...  Only the
+// value matters here; the declared width is redundant with the pin count.
+uint64_t parse_init(const std::string &text)
+{
+    auto tick = text.find('\'');
+    std::string body = (tick == std::string::npos) ? text : text.substr(tick + 1);
+    if (body.empty())
+        return 0;
+    char base = char(::tolower(body[0]));
+    std::string digits = body.substr(base == 'b' || base == 'h' || base == 'o' || base == 'd' ? 1 : 0);
+    std::string clean;
+    for (char c : digits)
+        if (c != '_')
+            clean.push_back(c);
+    int radix = base == 'b' ? 2 : base == 'o' ? 8 : base == 'd' ? 10 : 16;
+    return std::strtoull(clean.c_str(), nullptr, radix);
+}
+
+std::string bit_name(const std::string &port, int bit) { return port + "[" + std::to_string(bit) + "]"; }
+
+// How many bits a connection carries.  After `splitnets` every net is a
+// scalar, so the only wide things left are constants, part selects and the
+// concatenations that carry logic is written with.
+int expr_width(const Expr &e)
+{
+    switch (e.kind) {
+    case Expr::Kind::Const: {
+        auto tick = e.const_text.find('\'');
+        if (tick == std::string::npos || tick == 0)
+            return 1;
+        int w = std::atoi(e.const_text.substr(0, tick).c_str());
+        return w > 0 ? w : 1;
+    }
+    case Expr::Kind::PartSel:
+        return std::abs(e.range.msb - e.range.lsb) + 1;
+    case Expr::Kind::Concat: {
+        int w = 0;
+        for (const auto &p : e.parts)
+            w += expr_width(p);
+        return w;
+    }
+    default:
+        return 1;
+    }
+}
+
+// The net carrying bit `bit` of a connection, or "" if that bit is not a
+// plain net (a constant, say).  Used to record what an instance drives.
+std::string net_of_bit(const Expr &e, int bit)
+{
+    switch (e.kind) {
+    case Expr::Kind::Id:
+        return bit == 0 ? e.name : bit_name(e.name, bit);
+    case Expr::Kind::BitSel:
+        return bit == 0 ? bit_name(e.name, e.index) : std::string();
+    case Expr::Kind::PartSel:
+        return bit_name(e.name, std::min(e.range.msb, e.range.lsb) + bit);
+    case Expr::Kind::Concat: {
+        // parts are written most significant first, so bit 0 is at the end
+        int seen = 0;
+        for (auto it = e.parts.rbegin(); it != e.parts.rend(); ++it) {
+            int w = expr_width(*it);
+            if (bit < seen + w)
+                return net_of_bit(*it, bit - seen);
+            seen += w;
+        }
+        return std::string();
+    }
+    default:
+        return std::string();
+    }
+}
+
+} // namespace
+
+Lit Cones::sym_state(const std::string &x)
+{
+    auto r = rename_.find(x);
+    return net_.input(r == rename_.end() ? x : r->second);
+}
+
+std::string Cones::resolve(std::string n) const
+{
+    std::set<std::string> seen;
+    while (alias_.count(n) && !seen.count(n)) {
+        seen.insert(n);
+        n = alias_.at(n);
+    }
+    return n;
+}
+
+Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::string> &rename)
+    : mod_(m), net_(net), rename_(rename)
+{
+    for (const auto &p : m.ports)
+        if (p.dir == PortDecl::Dir::Input || p.dir == PortDecl::Dir::Inout) {
+            if (p.range.scalar)
+                inputs_.insert(p.name);
+            else
+                for (int i = 0; i < p.range.width(); i++)
+                    inputs_.insert(bit_name(p.name, i));
+        }
+
+    // `assign n = 1'b0;` is a tie-off, not a free net.  The extraction uses
+    // these for genuinely-unrouted inputs, and missing them turns each one
+    // into a free variable -- which makes any miter trivially satisfiable.
+    for (const auto &a : m.assigns) {
+        if (a.rhs.kind != Expr::Kind::Const)
+            continue;
+        bool v = parse_init(a.rhs.const_text) & 1;
+        if (a.lhs.kind == Expr::Kind::Id)
+            const_net_[a.lhs.name] = v;
+        else if (a.lhs.kind == Expr::Kind::BitSel)
+            const_net_[bit_name(a.lhs.name, a.lhs.index)] = v;
+    }
+
+    // `assign a = b;` is an alias, not logic
+    for (const auto &a : m.assigns)
+        if (a.lhs.kind == Expr::Kind::Id && a.rhs.kind == Expr::Kind::Id)
+            alias_[a.lhs.name] = a.rhs.name;
+        else if (a.lhs.kind == Expr::Kind::BitSel && a.rhs.kind == Expr::Kind::Id)
+            alias_[bit_name(a.lhs.name, a.lhs.index)] = a.rhs.name;
+        else if (a.lhs.kind == Expr::Kind::Id && a.rhs.kind == Expr::Kind::BitSel)
+            alias_[a.lhs.name] = bit_name(a.rhs.name, a.rhs.index);
+        else if (a.lhs.kind == Expr::Kind::BitSel && a.rhs.kind == Expr::Kind::BitSel)
+            alias_[bit_name(a.lhs.name, a.lhs.index)] = bit_name(a.rhs.name, a.rhs.index);
+
+    for (const auto &inst : m.instances) {
+        // A carry cell drives eight nets from two four-bit pins, so its
+        // outputs are recorded bit by bit; everything else here drives one
+        // net from one pin.
+        if (inst.type == "CARRY4") {
+            for (const char *bus : {"O", "CO"}) {
+                const Pin *p = inst.find_pin(bus);
+                if (!p)
+                    continue;
+                for (int i = 0; i < 4; i++) {
+                    std::string n = net_of_bit(p->conn, i);
+                    if (!n.empty())
+                        driver_[n] = Driver{&inst, bit_name(bus, i)};
+                }
+            }
+            continue;
+        }
+
+        for (const auto &pin : inst.pins) {
+            bool is_out = (is_xcol(inst.type) && (pin.name == "Q" || pin.name == "MUX" ||
+                                                  pin.name == "O6" || pin.name == "O5" ||
+                                                  pin.name == "CO")) ||
+                          (FF_TYPES.count(inst.type) && pin.name == "Q") ||
+                          (inst.type == "LUT6_2" && (pin.name == "O6" || pin.name == "O5")) ||
+                          (inst.type.rfind("LUT", 0) == 0 && inst.type != "LUT6_2" && pin.name == "O") ||
+                          (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
+                          (inst.type == "INV" && pin.name == "O") ||
+                          (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
+                          (inst.type == "IDELAYE2" && pin.name == "DATAOUT");
+            if (!is_out)
+                continue;
+            std::string n;
+            if (pin.conn.kind == Expr::Kind::Id)
+                n = pin.conn.name;
+            else if (pin.conn.kind == Expr::Kind::BitSel)
+                n = bit_name(pin.conn.name, pin.conn.index);
+            else
+                continue;
+            driver_[n] = Driver{&inst, pin.name};
+            if (FF_TYPES.count(inst.type)) {
+                states_.insert(n);
+                ff_by_state_[n] = &inst;
+            }
+            // an xcol column holds two registers: the main FF on Q, and the
+            // second FF observable on MUX when the output mux selects it
+            if (is_xcol(inst.type)) {
+                if (pin.name == "Q" && param_str(inst, "FF_SRC", "none") != "none") {
+                    states_.insert(n);
+                    ff_by_state_[n] = &inst;
+                } else if (pin.name == "MUX" && param_str(inst, "OUTMUX", "none") == "5Q") {
+                    states_.insert(n);
+                    ff_by_state_[n] = &inst;
+                }
+            }
+        }
+    }
+}
+
+Lit Cones::eval_expr(const Expr &e, int depth)
+{
+    switch (e.kind) {
+    case Expr::Kind::Unconnected:
+        return LIT_FALSE;
+    case Expr::Kind::Const: {
+        // 1'b1 / 1'b0 -- anything wider has no business on a scalar pin
+        uint64_t v = parse_init(e.const_text);
+        return (v & 1) ? LIT_TRUE : LIT_FALSE;
+    }
+    case Expr::Kind::Id:
+        return eval_net(e.name, depth);
+    case Expr::Kind::BitSel:
+        return eval_net(bit_name(e.name, e.index), depth);
+    default:
+        return LIT_FALSE;
+    }
+}
+
+Lit Cones::eval_bit(const Expr &e, int bit, int depth)
+{
+    switch (e.kind) {
+    case Expr::Kind::Unconnected:
+        return LIT_FALSE;
+    case Expr::Kind::Const:
+        return ((parse_init(e.const_text) >> bit) & 1) ? LIT_TRUE : LIT_FALSE;
+    case Expr::Kind::Concat: {
+        int seen = 0;
+        for (auto it = e.parts.rbegin(); it != e.parts.rend(); ++it) {
+            int w = expr_width(*it);
+            if (bit < seen + w)
+                return eval_bit(*it, bit - seen, depth);
+            seen += w;
+        }
+        return LIT_FALSE;
+    }
+    default: {
+        std::string n = net_of_bit(e, bit);
+        return n.empty() ? LIT_FALSE : eval_net(n, depth);
+    }
+    }
+}
+
+Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int depth)
+{
+    auto in = [&](const char *p) {
+        const Pin *q = inst.find_pin(p);
+        return q ? eval_expr(q->conn, depth + 1) : LIT_FALSE;
+    };
+
+    if (PASSTHROUGH.count(inst.type)) {
+        Lit i = in("I");
+        return (pin == "OB") ? negate(i) : i;
+    }
+
+    if (inst.type == "INV")
+        return negate(in("I"));
+
+    {
+        auto bd = BIDIR_RECEIVE.find(inst.type);
+        if (bd != BIDIR_RECEIVE.end() && pin == "O")
+            return in(bd->second.c_str());
+    }
+
+    // A delay line carries its input to its output unchanged.  It changes
+    // WHEN a value arrives, never what it is, so for any boolean statement
+    // about the design it is a wire -- and that is exactly the extent of what
+    // checking a design containing one establishes.  DELAY_SRC says which of
+    // the two inputs is being delayed.
+    if (inst.type == "IDELAYE2" && pin == "DATAOUT")
+        return in(param_str(inst, "DELAY_SRC", "IDATAIN") == "DATAIN" ? "DATAIN" : "IDATAIN");
+
+    if (inst.type == "CARRY4") {
+        // Four stages of the same cell.  The carry into the chain is CYINIT
+        // at the bottom of a column and CI above it; the unused one is tied
+        // low, which is why the primitive can simply take both.  Then per
+        // stage: the sum bit is the propagate signal against the incoming
+        // carry, and the outgoing carry either propagates it or takes the
+        // generate input DI -- the same mux the fabric's own column model
+        // makes out of O6, CI and the O5/X choice.
+        const Pin *sp = inst.find_pin("S"), *dp = inst.find_pin("DI");
+        Lit carry = net_.mk_or(in("CI"), in("CYINIT"));
+        for (int i = 0; i < 4; i++) {
+            Lit s = sp ? eval_bit(sp->conn, i, depth + 1) : LIT_FALSE;
+            Lit di = dp ? eval_bit(dp->conn, i, depth + 1) : LIT_FALSE;
+            Lit sum = net_.mk_xor(s, carry);
+            Lit co = net_.mk_or(net_.mk_and(s, carry), net_.mk_and(negate(s), di));
+            if (pin == bit_name("O", i))
+                return sum;
+            if (pin == bit_name("CO", i))
+                return co;
+            carry = co;
+        }
+        return LIT_FALSE;
+    }
+
+    if (is_xcol(inst.type)) {
+        std::vector<Lit> ins;
+        for (int i = 1; i <= 6; i++) {
+            const Pin *p = inst.find_pin("A" + std::to_string(i));
+            ins.push_back(p ? eval_expr(p->conn, depth + 1) : LIT_TRUE);   // unused inputs pull up
+        }
+        uint64_t init = parse_init(param_str(inst, "INIT", "0"));
+        if (pin == "O6")
+            return net_.mk_lut(ins, init);
+        if (pin == "O5") {
+            std::vector<Lit> five(ins.begin(), ins.begin() + 5);
+            return net_.mk_lut(five, init & 0xffffffffull);
+        }
+        // The carry cell a column contributes to the chain.  O6 is the
+        // propagate signal: it either passes the incoming carry along or
+        // replaces it with the generate input, which is O5 or the X bypass
+        // according to CY0.  XOR is the sum, and has no pin of its own -- it
+        // reaches the world only through the flip-flop or the output mux.
+        if (pin == "CO" || pin == "XOR") {
+            Lit o6 = eval_cell_output(inst, "O6", depth);
+            Lit ci = in("CI");
+            if (pin == "XOR")
+                return net_.mk_xor(o6, ci);
+            Lit di = param_str(inst, "CY0", "X") == "O5" ? eval_cell_output(inst, "O5", depth)
+                                                         : in("X");
+            return net_.mk_or(net_.mk_and(o6, ci), net_.mk_and(negate(o6), di));
+        }
+        if (pin == "Q")
+            return sym_state(n_for_output(inst, "Q"));
+        if (pin == "MUX") {
+            std::string sel = param_str(inst, "OUTMUX", "none");
+            if (sel == "5Q") return sym_state(n_for_output(inst, "MUX"));
+            if (sel == "O6") return eval_cell_output(inst, "O6", depth);
+            if (sel == "O5") return eval_cell_output(inst, "O5", depth);
+            if (sel == "XOR") return eval_cell_output(inst, "XOR", depth);
+            if (sel == "CY") return eval_cell_output(inst, "CO", depth);
+            return LIT_FALSE;
+        }
+        return LIT_FALSE;
+    }
+
+    if (inst.type == "LUT6_2" || inst.type.rfind("LUT", 0) == 0) {
+        std::vector<Lit> ins;
+        for (int i = 0;; i++) {
+            const Pin *p = inst.find_pin("I" + std::to_string(i));
+            if (!p)
+                break;
+            ins.push_back(eval_expr(p->conn, depth + 1));
+        }
+        auto init = inst.param("INIT");
+        uint64_t val = init ? parse_init(*init) : 0;
+        if (inst.type == "LUT6_2") {
+            if (pin == "O5") {
+                // O5 is the same INIT read with I5 held low: the low half
+                std::vector<Lit> five(ins.begin(), ins.begin() + std::min<size_t>(5, ins.size()));
+                return net_.mk_lut(five, val & 0xffffffffull);
+            }
+            return net_.mk_lut(ins, val);
+        }
+        return net_.mk_lut(ins, val);
+    }
+
+    throw std::runtime_error("cone: no model for cell type " + inst.type + " (pin " + pin + ")");
+}
+
+Lit Cones::eval_net(const std::string &raw, int depth)
+{
+    if (depth > 4096)
+        throw std::runtime_error("cone: combinational loop at " + raw);
+    std::string n = resolve(raw);
+
+    auto it = memo_.find(n);
+    if (it != memo_.end())
+        return it->second;
+
+    Lit result;
+    auto c = const_net_.find(n);
+    if (c != const_net_.end()) {
+        result = c->second ? LIT_TRUE : LIT_FALSE;
+        memo_[n] = result;
+        return result;
+    }
+    auto sym = [&](const std::string &x) {
+        auto r = rename_.find(x);
+        return net_.input(r == rename_.end() ? x : r->second);
+    };
+    if (states_.count(n)) {
+        // a register output is a free symbol -- shared with the other side
+        result = sym(n);
+    } else if (inputs_.count(n)) {
+        result = sym(n);
+    } else {
+        auto d = driver_.find(n);
+        if (d == driver_.end()) {
+            // undriven: a free variable, and worth counting -- an undriven net
+            // that exists on only one side is how a comparison goes wrong
+            free_nets_.insert(n);
+            result = sym(n);
+        } else {
+            memo_[n] = LIT_FALSE; // break loops while descending
+            result = eval_cell_output(*d->second.inst, d->second.pin, depth);
+        }
+    }
+    memo_[n] = result;
+    return result;
+}
+
+std::set<std::string> Cones::synonyms(const std::string &net) const
+{
+    std::set<std::string> r{net};
+    for (const auto &[from, to] : alias_) {
+        (void)to;
+        if (resolve(from) == net)
+            r.insert(from);
+    }
+    return r;
+}
+
+// the net an xcol drives from a given pin, as a state symbol name
+std::string Cones::n_for_output(const Instance &inst, const std::string &pin) const
+{
+    const Pin *p = inst.find_pin(pin);
+    if (!p) return inst.name + "." + pin;
+    if (p->conn.kind == Expr::Kind::Id) return p->conn.name;
+    if (p->conn.kind == Expr::Kind::BitSel) return bit_name(p->conn.name, p->conn.index);
+    return inst.name + "." + pin;
+}
+
+Lit Cones::next_state(const std::string &state_name)
+{
+    auto it = ff_by_state_.find(state_name);
+    if (it == ff_by_state_.end())
+        throw std::runtime_error("cone: no register drives " + state_name);
+    const Instance &ff = *it->second;
+
+    if (is_xcol(ff.type)) {
+        auto pin_lit = [&](const char *p, Lit dflt) {
+            const Pin *q = ff.find_pin(p);
+            return q ? eval_expr(q->conn, 0) : dflt;
+        };
+        bool second = (n_for_output(ff, "MUX") == state_name);
+        std::string src = param_str(ff, second ? "FF5_SRC" : "FF_SRC", "none");
+        Lit d = LIT_FALSE;
+        if (src == "O6") d = eval_cell_output(ff, "O6", 0);
+        else if (src == "O5") d = eval_cell_output(ff, "O5", 0);
+        else if (src == "X") d = pin_lit("X", LIT_FALSE);
+        else if (src == "XOR") d = eval_cell_output(ff, "XOR", 0);
+        else if (src == "CY") d = eval_cell_output(ff, "CO", 0);
+        Lit ce = pin_lit("CE", LIT_TRUE);
+        Lit sr = pin_lit("SR", LIT_FALSE);
+        Lit q = sym_state(state_name);
+        Lit next = net_.mk_or(net_.mk_and(ce, d), net_.mk_and(negate(ce), q));
+        std::string srval = param_str(ff, second ? "FF5_SRVAL" : "FF_SRVAL", "1'b0");
+        bool sv = !srval.empty() && srval.back() == '1';
+        next = sv ? net_.mk_or(sr, next) : net_.mk_and(negate(sr), next);
+        return next;
+    }
+
+    auto pin_lit = [&](const char *p, Lit dflt) {
+        const Pin *q = ff.find_pin(p);
+        return q ? eval_expr(q->conn, 0) : dflt;
+    };
+
+    Lit d = pin_lit("D", LIT_FALSE);
+    Lit ce = pin_lit("CE", LIT_TRUE);
+    Lit q = net_.input(state_name);
+    // CE low holds the current value
+    Lit next = net_.mk_or(net_.mk_and(ce, d), net_.mk_and(negate(ce), q));
+
+    if (ff.type == "FDRE") {
+        Lit r = pin_lit("R", LIT_FALSE);
+        next = net_.mk_and(negate(r), next);
+    } else if (ff.type == "FDSE") {
+        Lit s = pin_lit("S", LIT_FALSE);
+        next = net_.mk_or(s, next);
+    } else if (ff.type == "FDCE") {
+        Lit clr = pin_lit("CLR", LIT_FALSE);
+        next = net_.mk_and(negate(clr), next);
+    } else if (ff.type == "FDPE") {
+        Lit pre = pin_lit("PRE", LIT_FALSE);
+        next = net_.mk_or(pre, next);
+    }
+    return next;
+}
+
+Lit Cones::output_bit(const std::string &port, int bit)
+{
+    for (const auto &p : mod_.ports)
+        if (p.name == port && p.range.scalar)
+            return eval_net(port, 0);
+    return eval_net(bit_name(port, bit), 0);
+}
+
+std::vector<std::pair<std::string, int>> Cones::output_bits() const
+{
+    std::vector<std::pair<std::string, int>> r;
+    for (const auto &p : mod_.ports)
+        if (p.dir == PortDecl::Dir::Output) {
+            if (p.range.scalar)
+                r.emplace_back(p.name, -1);
+            else
+                for (int i = 0; i < p.range.width(); i++)
+                    r.emplace_back(p.name, i);
+        }
+    return r;
+}
+
+} // namespace lvs

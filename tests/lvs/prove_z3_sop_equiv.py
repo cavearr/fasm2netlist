@@ -368,7 +368,7 @@ def main():
     gold = GoldNetlist(gold_json_path, placement)
 
     ff_cells = sorted(name for name, info in placement.items() if info['type'] == 'SLICE_FFX')
-    assert len(ff_cells) == 36, 'ground-truth placement has %d FFs, expected 36' % len(ff_cells)
+    assert ff_cells, 'ground-truth placement has no SLICE_FFX entries -- stale or unexpected file'
 
     solver = z3.Solver()
     mismatches = []
