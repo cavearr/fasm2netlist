@@ -557,14 +557,17 @@ int main(int argc, char **argv)
             if (ti == tiles.end()) continue;
             load_type(ti->second.type);
             for (const auto &pins : site_pins[ti->second.type]) {
-                // ILOGIC receives on D and presents O; OLOGIC takes D1 and
-                // drives OQ.  A site with neither pair is not I/O logic.
-                for (int out = 0; out < 2; out++) {
-                    auto d = pins.find(out ? "OQ" : "O");
-                    auto sp = pins.find(out ? "D1" : "D");
-                    if (d == pins.end() || sp == pins.end()) continue;
+                // ILOGIC receives on D (or DDLY, from the delay beside it) and
+                // presents O; OLOGIC takes D1 and drives OQ; IDELAY takes
+                // IDATAIN from the pad or DATAIN from the fabric and presents
+                // DATAOUT.  A site with none of those pairs is not I/O logic.
+                for (int kind = 0; kind < 3; kind++) {
+                    const char *out_pin = kind == 0 ? "O" : kind == 1 ? "OQ" : "DATAOUT";
+                    const char *tags[] = {"ILOGIC", "OLOGIC", "IDELAY"};
+                    auto d = pins.find(out_pin);
+                    if (d == pins.end()) continue;
                     const std::string &owire = d->second;
-                    std::string tag = out ? "OLOGIC" : "ILOGIC";
+                    std::string tag = tags[kind];
                     auto at = owire.find(tag);
                     if (at == std::string::npos) continue;
 
@@ -575,6 +578,18 @@ int main(int argc, char **argv)
                         unmodelled_io++;
                         continue;
                     }
+
+                    // Which input the site is passing through is a decoded
+                    // fact, not a fixed pin: the ILOGIC mux may select the
+                    // delayed input, and the delay may be fed from the pad or
+                    // from the fabric.
+                    const char *in_pin = kind == 0 ? "D" : kind == 1 ? "D1" : "IDATAIN";
+                    if (cfg != dc.iologic.end()) {
+                        if (kind == 0 && cfg->second.delayed_input) in_pin = "DDLY";
+                        if (kind == 2 && !cfg->second.delay_from_pad) in_pin = "DATAIN";
+                    }
+                    auto sp = pins.find(in_pin);
+                    if (sp == pins.end()) continue;
 
                     std::string dst = tw(tkv.first, owire), src = tw(tkv.first, sp->second);
                     if (already.count(dst)) { hardwired++; continue; }

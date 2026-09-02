@@ -184,7 +184,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (inst.type.rfind("LUT", 0) == 0 && inst.type != "LUT6_2" && pin.name == "O") ||
                           (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
                           (inst.type == "INV" && pin.name == "O") ||
-                          (BIDIR_RECEIVE.count(inst.type) && pin.name == "O");
+                          (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
+                          (inst.type == "IDELAYE2" && pin.name == "DATAOUT");
             if (!is_out)
                 continue;
             std::string n;
@@ -277,6 +278,14 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
         if (bd != BIDIR_RECEIVE.end() && pin == "O")
             return in(bd->second.c_str());
     }
+
+    // A delay line carries its input to its output unchanged.  It changes
+    // WHEN a value arrives, never what it is, so for any boolean statement
+    // about the design it is a wire -- and that is exactly the extent of what
+    // checking a design containing one establishes.  DELAY_SRC says which of
+    // the two inputs is being delayed.
+    if (inst.type == "IDELAYE2" && pin == "DATAOUT")
+        return in(param_str(inst, "DELAY_SRC", "IDATAIN") == "DATAIN" ? "DATAIN" : "IDATAIN");
 
     if (inst.type == "CARRY4") {
         // Four stages of the same cell.  The carry into the chain is CYINIT

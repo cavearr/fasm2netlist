@@ -90,7 +90,8 @@ std::optional<uint64_t> parse_bits(const std::string &v)
 bool is_slice_site(const std::string &s) { return s.rfind("SLICEM_", 0) == 0 || s.rfind("SLICEL_", 0) == 0; }
 bool is_iologic_site(const std::string &s)
 {
-    return s.rfind("OLOGIC_Y", 0) == 0 || s.rfind("ILOGIC_Y", 0) == 0;
+    return s.rfind("OLOGIC_Y", 0) == 0 || s.rfind("ILOGIC_Y", 0) == 0 ||
+           s.rfind("IDELAY_Y", 0) == 0;
 }
 
 // tile type from the tile name: CLBLM_R_X31Y135 -> CLBLM_R
@@ -140,6 +141,7 @@ DesignConfig read_fasm(const std::string &path)
             io.tile_type = tile_type_of(tile);
             io.site = parts[1];
             io.is_output = parts[1][0] == 'O';
+            io.is_delay = parts[1].rfind("IDELAY_Y", 0) == 0;
             std::string rest = feature.substr(tile.size() + parts[1].size() + 2);
             if (rest == "OQUSED") io.oq_used = true;
             else if (rest.rfind("OMUX.", 0) == 0) io.omux = rest.substr(5);
@@ -147,6 +149,19 @@ DesignConfig read_fasm(const std::string &path)
             // The tristate path is not the data path: a pad driven all the
             // time still configures it, and BUF is that "always on" setting.
             else if (rest == "OSERDES.DATA_RATE_TQ.BUF") {}
+            // The ILOGIC input mux: P0 takes the delayed input from the
+            // IDELAY beside it rather than the pad's own D.
+            else if (rest == "IDELMUXE3.P0") io.delayed_input = true;
+            // How the delay is set up says nothing about the value passing
+            // through it, only about when: a tap count, a performance mode,
+            // whether it is in use at all.
+            else if (io.is_delay && (rest == "IN_USE" || rest == "HIGH_PERFORMANCE_MODE" ||
+                                     rest.rfind("IDELAY_TYPE_", 0) == 0 ||
+                                     rest.rfind("IDELAY_VALUE", 0) == 0 ||
+                                     rest.rfind("ZIDELAY_VALUE", 0) == 0 ||
+                                     rest.rfind("ZFINEDELAY", 0) == 0)) {}
+            else if (io.is_delay && rest == "DELAY_SRC_IDATAIN") io.delay_from_pad = true;
+            else if (io.is_delay && rest == "DELAY_SRC_DATAIN") io.delay_from_pad = false;
             else io.unhandled.push_back(rest);
             continue;
         }

@@ -83,15 +83,28 @@ struct IoLogicConfig
 {
     std::string tile, tile_type, site;   // e.g. RIOI3_X43Y61, OLOGIC_Y1
     bool is_output = false;              // OLOGIC (out) or ILOGIC (in)
+    bool is_delay = false;               // IDELAY: the tap between pad and ILOGIC
+    bool delayed_input = false;          // ILOGIC: IDELMUXE3 takes DDLY, not D
+    bool delay_from_pad = true;          // IDELAY: DELAY_SRC is IDATAIN, not DATAIN
     bool oq_used = false;                // OQUSED: the pad is driven from OQ
     std::string omux;                    // what OMUX selects, "" if unset
-    bool d_inverted = true;              // ILOGIC: ZINV_D clears this
+    // ZINV_D says explicitly that the input is not inverted, but the bit does
+    // not exist in every family's database -- virtex7's segbits_rioi.db has no
+    // such line -- so its absence cannot be read as an inversion.  Nothing
+    // seen so far inverts here; an ILOGIC that does would fail its proof,
+    // which is the right way to find out rather than the wrong default.
+    bool d_inverted = false;
     std::vector<std::string> unhandled;  // anything implying more than a wire
 
     // True when this site is a plain connection and nothing more.
     bool is_bypass() const
     {
         if (!unhandled.empty()) return false;
+        // A delay line is a wire as far as any boolean statement about the
+        // design goes: it changes when a value arrives, never what it is.
+        // That is the whole of what makes IDELAYE2 checkable here, and the
+        // whole of what this check does not cover.
+        if (is_delay) return true;
         return is_output ? (oq_used && omux == "D1") : !d_inverted;
     }
 };
