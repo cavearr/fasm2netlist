@@ -1,8 +1,8 @@
-read_json /home/jonathan/xc7-bitstream-tools/examples/vc707-johnson/johnson.json
-read_verilog /tmp/lvs-work/cells_min.v
+read_json @REPO@/examples/vc707-johnson/johnson.json
+read_verilog @WORK@/cells_min.v
 hierarchy -top top ; splitnets ; prep -top top -flatten ; design -stash gold
 
-read_verilog /tmp/lvs-work/cells_min.v /tmp/lvs-work/johnson_lvs_named.v
+read_verilog @WORK@/cells_min.v @WORK@/johnson_lvs_named.v
 hierarchy -top top ; splitnets ; prep -top top -flatten ; design -stash gate
 
 design -copy-from gold -as gold top
@@ -14,4 +14,4 @@ hierarchy -top miter
 async2sync
 hierarchy -top miter
 stat
-sat -tempinduct -seq 4 -prove trigger 0 -dump_json /tmp/lvs-work/cex_induct.json -timeout 600
+sat -tempinduct -seq 4 -prove trigger 0 -dump_json @WORK@/cex_induct.json -timeout 600

@@ -1,13 +1,13 @@
-read_verilog /tmp/lvs-work/cells_min.v
-read_json /tmp/lvs-work/gold_nobb.json
+read_verilog @WORK@/cells_min.v
+read_json @WORK@/gold_nobb.json
 hierarchy -top top ; proc ; flatten ; splitnets ; opt_clean
 expose -dff
 rename top gold
-write_verilog -noattr /tmp/lvs-work/gold_exp.v
+write_verilog -noattr @WORK@/gold_exp.v
 design -reset
 
-read_verilog /tmp/lvs-work/cells_min.v /tmp/lvs-work/johnson_lvs_named.v
+read_verilog @WORK@/cells_min.v @WORK@/johnson_lvs_named.v
 hierarchy -top top ; proc ; flatten ; splitnets ; opt_clean
 expose -dff
 rename top gate
-write_verilog -noattr /tmp/lvs-work/gate_exp.v
+write_verilog -noattr @WORK@/gate_exp.v

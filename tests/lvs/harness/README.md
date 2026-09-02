@@ -40,9 +40,13 @@ hours:
                         is richer than a general SV frontend will parse
     pysat_solve.py      DIMACS in, SAT-competition answer out, so any pysat
                         solver can be used as `lvs_equiv --solver`
+    run_solvers.py      one CNF through every pysat solver, verdict and time
+                        side by side -- how a solver earns being linked
 
-`.ys.in` files carry absolute paths for the design under test; substitute them
-rather than editing in place.
+`.ys.in` files are templates: substitute `@REPO@` with a checkout and `@WORK@`
+with a scratch directory of your own, rather than editing them in place.  They
+deliberately name no absolute path -- work belongs somewhere that survives a
+reboot, which `/tmp` does not.
 
 ## Moved into the tools
 
