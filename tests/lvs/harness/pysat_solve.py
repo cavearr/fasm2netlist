@@ -1,4 +1,4 @@
-#!/home/jonathan/xc7-bitstream-tools/.venv/bin/python
+#!/usr/bin/env python3
 # DIMACS-in, SAT-competition-answer-out wrapper so any pysat solver can be
 # used as a plain command, which is all lvs_equiv's --solver expects.
 import sys

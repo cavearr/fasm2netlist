@@ -33,6 +33,7 @@
 #include <map>
 #include <set>
 #include <regex>
+#include <cstring>
 #include <sstream>
 
 using namespace lvs;
@@ -658,6 +659,11 @@ endmodule
                // O6 leaves the slice on the column's own site pin (A..D); O5
                // has no pin of its own -- it reaches the world through the 5FF
                // or the xMUX, both of which are wired below.
+               // The carry into this column: the previous column's CO, or
+               // whatever PRECYINIT selected at the bottom of the slice.  A
+               // column outside a chain still has the pin, tied low, because
+               // the model's XOR and CY paths read it unconditionally.
+               << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "),\n"
                << "     .O6(" << net(C) << "), .O5(), .Q(" << net(C + "Q")
                << "), .MUX(" << net(C + "MUX") << "), .CO("
                << (co_of.count(c) ? co_of[c] : std::string()) << "));\n";
@@ -674,6 +680,29 @@ endmodule
     for (const auto &kv : dsu.parent) roots.insert(dsu.find(kv.first));
     std::set<std::string> driven;
     for (const auto &x : driven_raw) driven.insert(sanitise(dsu.find(x)));
+    // The interconnect's constant rails are named, not undriven.  A net that
+    // reaches GND_WIRE reads 0 and one that reaches VCC_WIRE reads 1; only a
+    // net that reaches nothing at all takes the pull-up.  Getting this wrong
+    // is invisible in a design without carries -- an unused LUT input reads
+    // the same either way -- and fatal in one with them, because a carry
+    // chain starting from a grounded CYINIT then starts from 1.
+    std::map<std::string, int> rail;   // sanitised root -> the value it is held at
+    for (const auto &kv : dsu.parent) {
+        const std::string &ep = kv.first;
+        auto ends_with = [&](const char *suffix) {
+            size_t n = strlen(suffix);
+            return ep.size() >= n && ep.compare(ep.size() - n, n, suffix) == 0;
+        };
+        int v = ends_with("GND_WIRE") ? 0 : ends_with("VCC_WIRE") ? 1 : -1;
+        if (v < 0)
+            continue;
+        std::string root = sanitise(dsu.find(ep));
+        auto it = rail.find(root);
+        if (it != rail.end() && it->second != v)
+            std::cerr << "  warning: " << root << " reaches both rails\n";
+        rail[root] = v;
+    }
+
     std::vector<std::string> ports, outs, tied;
     for (const auto &r : roots) {
         std::string n = sanitise(r);
@@ -692,6 +721,10 @@ endmodule
             if (r.find(pat) != std::string::npos) { is_port = true; break; }
         (is_port ? ports : tied).push_back(n);
     }
+    int railed = 0;
+    for (const auto &t : tied)
+        railed += rail.count(t) != 0;
+
     // a port keeps the design's own name where the XDC gave one
     std::vector<std::string> port_decl, out_decl;
     std::map<std::string, std::string> emit_as;
@@ -705,7 +738,8 @@ endmodule
     os << "// " << dsu.parent.size() << " (tile,wire) endpoints -> " << roots.size()
        << " nets, joined by " << joins << " tileconn pairs\n"
        << "// " << ports.size() << " inputs, " << outs.size() << " outputs, "
-       << tied.size() << " undriven nets at the interconnect pull-up\n"
+       << (tied.size() - size_t(railed)) << " undriven nets at the interconnect pull-up, "
+       << railed << " held at a GND/VCC rail\n"
        << "module fabric (\n";
     for (size_t i = 0; i < ports.size(); i++)
         os << "  input wire " << port_decl[i] << (i + 1 < ports.size() || !outs.empty() ? ",\n" : "\n");
@@ -718,9 +752,13 @@ endmodule
         std::string n = sanitise(r);
         if (driven.count(n) && !is_port.count(n)) os << "  wire " << emit_net(r) << ";\n";
     }
-    for (const auto &t : tied)
-        os << "  wire " << (emit_as.count(t) ? emit_as[t] : t) << " = 1'b" << pullup
-           << ";   // undriven\n";
+    for (const auto &t : tied) {
+        auto rv = rail.find(t);
+        bool on_rail = rv != rail.end();
+        os << "  wire " << (emit_as.count(t) ? emit_as[t] : t) << " = 1'b"
+           << (on_rail ? rv->second : pullup) << ";   // "
+           << (on_rail ? (rv->second ? "VCC rail" : "GND rail") : "undriven") << "\n";
+    }
     os << "\n";
     for (const auto &a : assigns)
         os << "  assign " << emit_net(a.first) << " = " << emit_net(a.second) << ";\n";

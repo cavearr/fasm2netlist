@@ -43,6 +43,59 @@ uint64_t parse_init(const std::string &text)
 
 std::string bit_name(const std::string &port, int bit) { return port + "[" + std::to_string(bit) + "]"; }
 
+// How many bits a connection carries.  After `splitnets` every net is a
+// scalar, so the only wide things left are constants, part selects and the
+// concatenations that carry logic is written with.
+int expr_width(const Expr &e)
+{
+    switch (e.kind) {
+    case Expr::Kind::Const: {
+        auto tick = e.const_text.find('\'');
+        if (tick == std::string::npos || tick == 0)
+            return 1;
+        int w = std::atoi(e.const_text.substr(0, tick).c_str());
+        return w > 0 ? w : 1;
+    }
+    case Expr::Kind::PartSel:
+        return std::abs(e.range.msb - e.range.lsb) + 1;
+    case Expr::Kind::Concat: {
+        int w = 0;
+        for (const auto &p : e.parts)
+            w += expr_width(p);
+        return w;
+    }
+    default:
+        return 1;
+    }
+}
+
+// The net carrying bit `bit` of a connection, or "" if that bit is not a
+// plain net (a constant, say).  Used to record what an instance drives.
+std::string net_of_bit(const Expr &e, int bit)
+{
+    switch (e.kind) {
+    case Expr::Kind::Id:
+        return bit == 0 ? e.name : bit_name(e.name, bit);
+    case Expr::Kind::BitSel:
+        return bit == 0 ? bit_name(e.name, e.index) : std::string();
+    case Expr::Kind::PartSel:
+        return bit_name(e.name, std::min(e.range.msb, e.range.lsb) + bit);
+    case Expr::Kind::Concat: {
+        // parts are written most significant first, so bit 0 is at the end
+        int seen = 0;
+        for (auto it = e.parts.rbegin(); it != e.parts.rend(); ++it) {
+            int w = expr_width(*it);
+            if (bit < seen + w)
+                return net_of_bit(*it, bit - seen);
+            seen += w;
+        }
+        return std::string();
+    }
+    default:
+        return std::string();
+    }
+}
+
 } // namespace
 
 Lit Cones::sym_state(const std::string &x)
@@ -98,13 +151,32 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             alias_[bit_name(a.lhs.name, a.lhs.index)] = bit_name(a.rhs.name, a.rhs.index);
 
     for (const auto &inst : m.instances) {
+        // A carry cell drives eight nets from two four-bit pins, so its
+        // outputs are recorded bit by bit; everything else here drives one
+        // net from one pin.
+        if (inst.type == "CARRY4") {
+            for (const char *bus : {"O", "CO"}) {
+                const Pin *p = inst.find_pin(bus);
+                if (!p)
+                    continue;
+                for (int i = 0; i < 4; i++) {
+                    std::string n = net_of_bit(p->conn, i);
+                    if (!n.empty())
+                        driver_[n] = Driver{&inst, bit_name(bus, i)};
+                }
+            }
+            continue;
+        }
+
         for (const auto &pin : inst.pins) {
             bool is_out = (is_xcol(inst.type) && (pin.name == "Q" || pin.name == "MUX" ||
-                                                  pin.name == "O6" || pin.name == "O5")) ||
+                                                  pin.name == "O6" || pin.name == "O5" ||
+                                                  pin.name == "CO")) ||
                           (FF_TYPES.count(inst.type) && pin.name == "Q") ||
                           (inst.type == "LUT6_2" && (pin.name == "O6" || pin.name == "O5")) ||
                           (inst.type.rfind("LUT", 0) == 0 && inst.type != "LUT6_2" && pin.name == "O") ||
-                          (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB"));
+                          (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
+                          (inst.type == "INV" && pin.name == "O");
             if (!is_out)
                 continue;
             std::string n;
@@ -153,6 +225,30 @@ Lit Cones::eval_expr(const Expr &e, int depth)
     }
 }
 
+Lit Cones::eval_bit(const Expr &e, int bit, int depth)
+{
+    switch (e.kind) {
+    case Expr::Kind::Unconnected:
+        return LIT_FALSE;
+    case Expr::Kind::Const:
+        return ((parse_init(e.const_text) >> bit) & 1) ? LIT_TRUE : LIT_FALSE;
+    case Expr::Kind::Concat: {
+        int seen = 0;
+        for (auto it = e.parts.rbegin(); it != e.parts.rend(); ++it) {
+            int w = expr_width(*it);
+            if (bit < seen + w)
+                return eval_bit(*it, bit - seen, depth);
+            seen += w;
+        }
+        return LIT_FALSE;
+    }
+    default: {
+        std::string n = net_of_bit(e, bit);
+        return n.empty() ? LIT_FALSE : eval_net(n, depth);
+    }
+    }
+}
+
 Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int depth)
 {
     auto in = [&](const char *p) {
@@ -163,6 +259,33 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
     if (PASSTHROUGH.count(inst.type)) {
         Lit i = in("I");
         return (pin == "OB") ? negate(i) : i;
+    }
+
+    if (inst.type == "INV")
+        return negate(in("I"));
+
+    if (inst.type == "CARRY4") {
+        // Four stages of the same cell.  The carry into the chain is CYINIT
+        // at the bottom of a column and CI above it; the unused one is tied
+        // low, which is why the primitive can simply take both.  Then per
+        // stage: the sum bit is the propagate signal against the incoming
+        // carry, and the outgoing carry either propagates it or takes the
+        // generate input DI -- the same mux the fabric's own column model
+        // makes out of O6, CI and the O5/X choice.
+        const Pin *sp = inst.find_pin("S"), *dp = inst.find_pin("DI");
+        Lit carry = net_.mk_or(in("CI"), in("CYINIT"));
+        for (int i = 0; i < 4; i++) {
+            Lit s = sp ? eval_bit(sp->conn, i, depth + 1) : LIT_FALSE;
+            Lit di = dp ? eval_bit(dp->conn, i, depth + 1) : LIT_FALSE;
+            Lit sum = net_.mk_xor(s, carry);
+            Lit co = net_.mk_or(net_.mk_and(s, carry), net_.mk_and(negate(s), di));
+            if (pin == bit_name("O", i))
+                return sum;
+            if (pin == bit_name("CO", i))
+                return co;
+            carry = co;
+        }
+        return LIT_FALSE;
     }
 
     if (is_xcol(inst.type)) {
@@ -178,6 +301,20 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             std::vector<Lit> five(ins.begin(), ins.begin() + 5);
             return net_.mk_lut(five, init & 0xffffffffull);
         }
+        // The carry cell a column contributes to the chain.  O6 is the
+        // propagate signal: it either passes the incoming carry along or
+        // replaces it with the generate input, which is O5 or the X bypass
+        // according to CY0.  XOR is the sum, and has no pin of its own -- it
+        // reaches the world only through the flip-flop or the output mux.
+        if (pin == "CO" || pin == "XOR") {
+            Lit o6 = eval_cell_output(inst, "O6", depth);
+            Lit ci = in("CI");
+            if (pin == "XOR")
+                return net_.mk_xor(o6, ci);
+            Lit di = param_str(inst, "CY0", "X") == "O5" ? eval_cell_output(inst, "O5", depth)
+                                                         : in("X");
+            return net_.mk_or(net_.mk_and(o6, ci), net_.mk_and(negate(o6), di));
+        }
         if (pin == "Q")
             return sym_state(n_for_output(inst, "Q"));
         if (pin == "MUX") {
@@ -185,6 +322,8 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             if (sel == "5Q") return sym_state(n_for_output(inst, "MUX"));
             if (sel == "O6") return eval_cell_output(inst, "O6", depth);
             if (sel == "O5") return eval_cell_output(inst, "O5", depth);
+            if (sel == "XOR") return eval_cell_output(inst, "XOR", depth);
+            if (sel == "CY") return eval_cell_output(inst, "CO", depth);
             return LIT_FALSE;
         }
         return LIT_FALSE;
@@ -295,6 +434,8 @@ Lit Cones::next_state(const std::string &state_name)
         if (src == "O6") d = eval_cell_output(ff, "O6", 0);
         else if (src == "O5") d = eval_cell_output(ff, "O5", 0);
         else if (src == "X") d = pin_lit("X", LIT_FALSE);
+        else if (src == "XOR") d = eval_cell_output(ff, "XOR", 0);
+        else if (src == "CY") d = eval_cell_output(ff, "CO", 0);
         Lit ce = pin_lit("CE", LIT_TRUE);
         Lit sr = pin_lit("SR", LIT_FALSE);
         Lit q = sym_state(state_name);

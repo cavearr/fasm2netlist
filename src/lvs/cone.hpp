@@ -51,6 +51,10 @@ class Cones
 
     Lit eval_net(const std::string &net_name, int depth);
     Lit eval_expr(const Expr &e, int depth);
+    // One bit of a possibly-wide connection: a concatenation, a sized
+    // constant, or a part select.  Carry logic is written as buses even in a
+    // gate-level netlist, so bit-addressing them is not optional.
+    Lit eval_bit(const Expr &e, int bit, int depth);
     Lit eval_cell_output(const Instance &inst, const std::string &pin, int depth);
     std::string resolve(std::string n) const;
     std::string n_for_output(const Instance &inst, const std::string &pin) const;
