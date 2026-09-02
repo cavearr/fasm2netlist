@@ -232,34 +232,81 @@ int main(int argc, char **argv)
     std::map<std::string, std::vector<std::string>> tiles_by_type;
     for (const auto &kv : tiles) tiles_by_type[kv.second.type].push_back(kv.first);
 
-    int joins = 0;
-    for (int round = 0; round < (hops > 0 ? hops : 4); round++) {
+    // Run to a fixpoint rather than a fixed number of rounds.  Growth walks
+    // the segments of a physical wire, so a round is one tile of travel and
+    // the number needed is the length of the longest wire the design uses: a
+    // fixed four reaches an EE4 and stops one short of nothing in particular,
+    // which silently cut every SE6 in nextpnr's arty example and left three
+    // of its four switch inputs unconnected to the logic that reads them.
+    // The loop already stops when a round adds nothing, so the fixpoint is
+    // what the cap was truncating; the cap remains only as a guard against a
+    // database that cycles, and says so if it is ever hit.
+    const int kMaxRounds = 64;
+
+    // The scan follows the frontier, not the die.  A round can only add an
+    // endpoint next to one already known, so there is no reason to visit a
+    // tile that has no known endpoint in it -- and visiting all of them is
+    // what made the fixpoint expensive, since the whole grid was re-examined
+    // once per round.  Indexing the tile-connection entries by tile type, on
+    // both sides, lets a round cost the design's own footprint instead.
+    std::map<std::string, std::vector<const json::Value *>> conn_by_type;
+    for (const auto &e : tc.items()) {
+        const auto &types = e.get("tile_types").items();
+        const auto &deltas = e.get("grid_deltas").items();
+        if (types.size() != 2 || deltas.size() != 2) continue;
+        conn_by_type[types[0].asString()].push_back(&e);
+        conn_by_type[types[1].asString()].push_back(&e);
+    }
+
+    auto tile_of = [](const std::string &endpoint) {
+        auto slash = endpoint.find('/');
+        return slash == std::string::npos ? endpoint : endpoint.substr(0, slash);
+    };
+    std::set<std::string> frontier_tiles;
+    for (const auto &k : known) frontier_tiles.insert(tile_of(k));
+
+    int joins = 0, rounds = 0;
+    for (int round = 0; round < (hops > 0 ? hops : kMaxRounds); round++) {
+        rounds = round + 1;
         size_t before = known.size();
-        for (const auto &e : tc.items()) {
-            const auto &types = e.get("tile_types").items();
-            const auto &deltas = e.get("grid_deltas").items();
-            if (types.size() != 2 || deltas.size() != 2) continue;
-            std::string ta = types[0].asString(), tb = types[1].asString();
-            int dx = int(deltas[0].asInt()), dy = int(deltas[1].asInt());
-            auto lst = tiles_by_type.find(ta);
-            if (lst == tiles_by_type.end()) continue;
-            for (const auto &t : lst->second) {
-                const TileInfo &ti = tiles[t];
-                auto nb = by_xy.find({ti.x + dx, ti.y + dy});
-                if (nb == by_xy.end() || tiles[nb->second].type != tb) continue;
-                for (const auto &wp : e.get("wire_pairs").items()) {
-                    if (wp.items().size() != 2) continue;
-                    std::string a = tw(t, wp.items()[0].asString());
-                    std::string b = tw(nb->second, wp.items()[1].asString());
-                    bool ka = known.count(a), kb = known.count(b);
-                    if (!ka && !kb) continue;
-                    dsu.unite(a, b);
-                    known.insert(a); known.insert(b);
-                    joins++;
+        std::set<std::string> next_tiles;
+        for (const auto &t : frontier_tiles) {
+            auto self = tiles.find(t);
+            if (self == tiles.end()) continue;
+            auto entries = conn_by_type.find(self->second.type);
+            if (entries == conn_by_type.end()) continue;
+            for (const json::Value *e : entries->second) {
+                const auto &types = e->get("tile_types").items();
+                const auto &deltas = e->get("grid_deltas").items();
+                int dx = int(deltas[0].asInt()), dy = int(deltas[1].asInt());
+                // This tile may be either end of the entry; as the second, the
+                // neighbour lies in the opposite direction and the wire pair
+                // reads the other way round.
+                for (int side = 0; side < 2; side++) {
+                    if (types[side].asString() != self->second.type) continue;
+                    int sx = side ? -dx : dx, sy = side ? -dy : dy;
+                    auto nb = by_xy.find({self->second.x + sx, self->second.y + sy});
+                    if (nb == by_xy.end() || tiles[nb->second].type != types[1 - side].asString())
+                        continue;
+                    for (const auto &wp : e->get("wire_pairs").items()) {
+                        if (wp.items().size() != 2) continue;
+                        std::string a = tw(t, wp.items()[side].asString());
+                        std::string b = tw(nb->second, wp.items()[1 - side].asString());
+                        bool ka = known.count(a), kb = known.count(b);
+                        if (!ka && !kb) continue;
+                        dsu.unite(a, b);
+                        if (!ka) { known.insert(a); next_tiles.insert(t); }
+                        if (!kb) { known.insert(b); next_tiles.insert(nb->second); }
+                        joins++;
+                    }
                 }
             }
         }
         if (known.size() == before) break;
+        if (rounds == kMaxRounds)
+            std::cerr << "  warning: net growth did not settle in " << kMaxRounds
+                      << " rounds; some nets may be incomplete\n";
+        frontier_tiles.swap(next_tiles);
     }
 
     // ---- pseudo-PIPs: the connections that carry no bits ------------------
