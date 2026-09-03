@@ -62,4 +62,16 @@ if(Python3_Interpreter_FOUND)
             --exe $<TARGET_FILE:fasm2netlist>
   )
   set_tests_properties(johnson_sat_match_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  # RTL -> bitstream -> netlist, one design per cell family: yosys and
+  # nextpnr-himbaechel build a bitstream from Verilog written here, and the
+  # extraction is graded against nextpnr's own placement dump from that same
+  # run (see tests/rtl/build_and_check.py). Skipped, not failed, when yosys or
+  # a built nextpnr or the prjxray database isn't present -- none is vendored.
+  add_test(
+    NAME rtl_roundtrip_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/rtl/build_and_check.py
+            --exe $<TARGET_FILE:fasm2netlist>
+  )
+  set_tests_properties(rtl_roundtrip_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

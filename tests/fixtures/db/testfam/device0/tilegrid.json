@@ -1,10 +1,50 @@
 {
-  "TESTCLB_X0Y0": {
-    "type": "TESTCLB",
-    "grid_x": 0,
-    "grid_y": 0,
-    "sites": {
-      "SLICE_X0Y0": "SLICEX"
-    }
-  }
+ "TESTBRAM_X2Y0": {
+  "grid_x": 2,
+  "grid_y": 0,
+  "sites": {
+   "RAMB18_X0Y0": "FIFO18E1",
+   "RAMB18_X0Y1": "RAMB18E1",
+   "RAMB36_X0Y0": "RAMBFIFO36E1"
+  },
+  "type": "TESTBRAM"
+ },
+ "TESTBRAM_X2Y1": {
+  "grid_x": 2,
+  "grid_y": 1,
+  "sites": {
+   "RAMB18_X0Y2": "FIFO18E1",
+   "RAMB18_X0Y3": "RAMB18E1",
+   "RAMB36_X0Y1": "RAMBFIFO36E1"
+  },
+  "type": "TESTBRAM"
+ },
+ "TESTCLBM_X0Y1": {
+  "grid_x": 0,
+  "grid_y": 1,
+  "sites": {
+   "SLICE_X0Y1": "SLICEM",
+   "SLICE_X1Y1": "SLICEM",
+   "SLICE_X2Y1": "SLICEM",
+   "SLICE_X3Y1": "SLICEM"
+  },
+  "type": "TESTCLBM"
+ },
+ "TESTCLB_X0Y0": {
+  "grid_x": 0,
+  "grid_y": 0,
+  "sites": {
+   "SLICE_X0Y0": "SLICEX"
+  },
+  "type": "TESTCLB"
+ },
+ "TESTDSP_X1Y0": {
+  "grid_x": 1,
+  "grid_y": 0,
+  "sites": {
+   "DSP48_X0Y0": "DSP48E1",
+   "DSP48_X0Y1": "DSP48E1"
+  },
+  "type": "TESTDSP"
+ }
 }
