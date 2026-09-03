@@ -17,6 +17,19 @@ const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "BUFG", "IBUFDS", "OB
 // hold a boolean value, so an inout is not compared as an output.
 const std::map<std::string, std::string> BIDIR_RECEIVE = {{"IOBUF", "IO"}, {"IOBUFDS", "IO"}};
 
+// The synthesis-side distributed RAMs, and how wide one port's data is.  Each
+// port is 64 stored bits either way -- 64 entries of one bit, or 32 of two --
+// which is exactly one SLICEM column, and is why the two sides can be matched
+// column for column.  The write address is port D's for both.
+const std::map<std::string, int> RAM_PORTS = {{"RAM64M", 1}, {"RAM32M", 2}};
+
+// Which stored bit port `p` reads at address `a` on data bit `d`: the address
+// for a 64-deep port, and for a 32-deep one the two data bits are the two
+// halves of the same column -- the same split the fabric makes between a
+// column's O5 and O6 reads.  Used by the state model, which is the flagged
+// alternative to cutting at the boundary.
+[[maybe_unused]] int ram_bit(int width, int addr, int d) { return width == 1 ? addr : d * 32 + addr; }
+
 // The tile model emitted by tileverilog.  One CLB column: a 6-input LUT read
 // two ways, a main flip-flop, a second flip-flop, and the output mux.  Its
 // selects arrive as string parameters, exactly as the FASM decoded them.
@@ -108,7 +121,19 @@ std::string net_of_bit(const Expr &e, int bit)
 Lit Cones::sym_state(const std::string &x)
 {
     auto r = rename_.find(x);
-    return net_.input(r == rename_.end() ? x : r->second);
+    if (r != rename_.end())
+        return net_.input(r->second);
+    // A stored bit is named after the net its column reads onto, so it
+    // inherits that net's renaming: rename the column and its whole contents
+    // follow.  Without this the two sides would agree on the register that
+    // reads a memory and disagree on every bit inside it.
+    auto at = x.rfind("$m");
+    if (at != std::string::npos) {
+        auto rr = rename_.find(x.substr(0, at));
+        if (rr != rename_.end())
+            return net_.input(rr->second + x.substr(at));
+    }
+    return net_.input(x);
 }
 
 std::string Cones::resolve(std::string n) const
@@ -186,7 +211,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
                           (inst.type == "INV" && pin.name == "O") ||
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
-                          (inst.type == "IDELAYE2" && pin.name == "DATAOUT");
+                          (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
+                          (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0);
             if (!is_out)
                 continue;
             std::string n;
@@ -203,6 +229,22 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             }
             // an xcol column holds two registers: the main FF on Q, and the
             // second FF observable on MUX when the output mux selects it
+            // A synthesis-side RAM port stores 64 bits, like the column it
+            // will be matched against.  Anchor them on the read output the
+            // fabric calls O6 -- the top data bit, which is the half a
+            // column's O6 reads -- so the two sides name the same thing.
+            if (memory_as_state_ && RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) {
+                int width = RAM_PORTS.at(inst.type);
+                std::string anchor = ram_anchor(inst, pin.name, width);
+                if (!anchor.empty())
+                    for (int b = 0; b < 64; b++) {
+                        std::string sn = mem_state_name(anchor, b);
+                        states_.insert(sn);
+                        mem_by_state_[sn] = &inst;
+                        mem_bit_[sn] = b;
+                        mem_port_[sn] = pin.name.size() > 2 ? pin.name[2] : 'A';
+                    }
+            }
             // A writable column stores 64 bits of state.  Enumerating them
             // here is what puts them in states(), so the prover asks for a
             // next-state function per stored bit the same way it does per
@@ -325,6 +367,22 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
         return LIT_FALSE;
     }
 
+    if (RAM_PORTS.count(inst.type) && pin.rfind("DO", 0) == 0) {
+        // A cut point.  What a memory reads is not derived here at all: it is
+        // a free symbol, and the paired memory on the other side is given the
+        // SAME one.  Everything downstream then references identical
+        // variables and cancels, so the proof reduces to the boundary --
+        // which is the thing that can actually be checked, and the thing that
+        // needs no agreement about what anything inside is called.
+        std::string base = pin;
+        int d = 0;
+        auto br = pin.find('[');
+        if (br != std::string::npos) { d = atoi(pin.c_str() + br + 1); base = pin.substr(0, br); }
+        std::string key = mem_cut_name(inst.name, base, d);
+        auto c = mem_cut_.find(key);
+        return net_.input(c == mem_cut_.end() ? key : c->second);
+    }
+
     if (is_xcol(inst.type)) {
         std::vector<Lit> ins;
         for (int i = 1; i <= 6; i++) {
@@ -332,15 +390,28 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             ins.push_back(p ? eval_expr(p->conn, depth + 1) : LIT_TRUE);   // unused inputs pull up
         }
         uint64_t init = parse_init(param_str(inst, "INIT", "0"));
-        bool is_ram = memory_as_state_ && param_str(inst, "RAM", "0") != "0";
+        bool param_ram = param_str(inst, "RAM", "0") != "0";
         if (pin == "O6" || pin == "O5") {
             int width = (pin == "O6") ? 6 : 5;
             std::vector<Lit> sel(ins.begin(), ins.begin() + width);
-            if (!is_ram) {
+            (void)sel;
+            if (!param_ram) {
                 // A fixed LUT: the contents are a constant, so the read is a
                 // truth table and no state is involved.
                 return (pin == "O6") ? net_.mk_lut(ins, init)
                                      : net_.mk_lut(sel, init & 0xffffffffull);
+            }
+            if (!memory_as_state_) {
+                // A cut point, the same as the synthesis side's RAM: what a
+                // writable column reads is a free symbol, and the column it is
+                // paired with gets the same one.  O6 and O5 are the two halves
+                // of the one memory, so they are two different bits of it.
+                // A column's O6 and O5 are the two halves of one memory, so
+                // they are bits 1 and 0 of its data -- the same two bits the
+                // synthesis side calls DOx[1] and DOx[0].
+                std::string key = mem_cut_name(inst.name, "DO", pin == "O6" ? 1 : 0);
+                auto c = mem_cut_.find(key);
+                return net_.input(c == mem_cut_.end() ? key : c->second);
             }
             // A writable column: the contents are STATE, so the read is a mux
             // over the stored bits rather than over a constant. Built as a
@@ -470,6 +541,29 @@ std::set<std::string> Cones::synonyms(const std::string &net) const
 // A stored bit's state symbol.  Anchored on the column's read output so the
 // name exists on both sides of a comparison: match the columns and the memory
 // bits match with them, exactly as matching a register matches its state.
+// A memory's read output, as a primary input: "ramname:pinname[bit]".
+// One predictable pattern, used by both sides, so that pairing two memories is
+// nothing more than agreeing on the ram name -- everything inside stays
+// anonymous, which is the point.
+std::string Cones::mem_cut_name(const std::string &ram, const std::string &pin, int bit)
+{
+    return ram + ":" + pin + "[" + std::to_string(bit) + "]";
+}
+
+// The net a RAM port reads its TOP data bit onto: DOx for a one-bit port,
+// DOx[1] for a two-bit one.  That is the bit a fabric column reads on O6, and
+// anchoring both sides there is what lets one rename match a whole memory.
+std::string Cones::ram_anchor(const Instance &inst, const std::string &pin, int width) const
+{
+    const Pin *p = inst.find_pin(pin);
+    if (!p) return {};
+    if (width == 1)
+        return p->conn.kind == Expr::Kind::Id ? p->conn.name
+             : p->conn.kind == Expr::Kind::BitSel ? bit_name(p->conn.name, p->conn.index)
+             : std::string();
+    return net_of_bit(p->conn, 1);
+}
+
 std::string Cones::mem_state_name(const std::string &anchor, int bit)
 {
     return anchor + "$m" + std::to_string(bit);
@@ -513,6 +607,33 @@ Lit Cones::next_state(const std::string &state_name)
             sel = net_.mk_and(sel, ((bit >> i) & 1) ? a : negate(a));
         }
         Lit di = pin_lit(small && (bit & 32) ? "DI2" : "DI", LIT_FALSE);
+        Lit write = net_.mk_and(we, sel);
+        return net_.mk_or(net_.mk_and(write, di), net_.mk_and(negate(write), held));
+    }
+
+    auto gram = mem_by_state_.find(state_name);
+    if (gram != mem_by_state_.end() && RAM_PORTS.count(gram->second->type)) {
+        // The synthesis side of the same statement.  Every port writes at
+        // port D's address -- one write address for the whole primitive, which
+        // is the slice's single write address seen from the other side.
+        const Instance &ram = *gram->second;
+        int width = RAM_PORTS.at(ram.type);
+        int bit = mem_bit_.at(state_name);
+        int abits = (width == 1) ? 6 : 5;
+        int addr = (width == 1) ? bit : (bit & 31);
+        int d = (width == 1) ? 0 : (bit >> 5);
+        char port = mem_port_.count(state_name) ? mem_port_.at(state_name) : 'A';
+        Lit held = sym_state(state_name);
+        const Pin *wp = ram.find_pin("ADDRD");
+        Lit sel = LIT_TRUE;
+        for (int i = 0; i < abits; i++) {
+            Lit a = wp ? eval_bit(wp->conn, i, 0) : LIT_FALSE;
+            sel = net_.mk_and(sel, ((addr >> i) & 1) ? a : negate(a));
+        }
+        const Pin *wep = ram.find_pin("WE");
+        Lit we = wep ? eval_expr(wep->conn, 0) : LIT_FALSE;
+        const Pin *dip = ram.find_pin(std::string("DI") + port);
+        Lit di = dip ? eval_bit(dip->conn, d, 0) : LIT_FALSE;
         Lit write = net_.mk_and(we, sel);
         return net_.mk_or(net_.mk_and(write, di), net_.mk_and(negate(write), held));
     }

@@ -22,6 +22,22 @@ namespace lvs {
 class Cones
 {
   public:
+    // One memory's boundary: the signals that have to agree for its contents
+    // to agree, and the symbols its reads produce.  This is what makes a RAM
+    // checkable without naming anything inside it -- prove the boundary and
+    // the contents follow, whatever either side calls them.
+    struct MemPort
+    {
+        std::string where;                 // instance, for the report only
+        std::vector<Lit> read_addr;        // what a read selects
+        std::vector<Lit> write_addr;       // ...and what a write selects
+        std::vector<Lit> write_data;       // data, low bit first
+        Lit write_enable = LIT_FALSE;
+        std::vector<std::string> out_sym;  // the cut symbol each data bit reads
+    };
+    // Every memory port in this module, in a stable order.
+    const std::vector<MemPort> &mem_ports() const { return mem_ports_; }
+
     // memory_as_state makes a writable column's 64 stored bits state
     // elements, so a design containing distributed RAM can be reasoned about
     // at all.  Off by default, and deliberately: it is only half of what a
@@ -84,7 +100,15 @@ class Cones
     // mem_bit_ to which bit it is.
     std::map<std::string, const Instance *> mem_by_state_;
     std::map<std::string, int> mem_bit_;
+    std::map<std::string, char> mem_port_;   // gold RAMs only: which port holds it
+    std::vector<MemPort> mem_ports_;
+    // The symbol a memory's data bit reads.  Paired memories are given the
+    // same one, which is the whole of how a cut point works: downstream cones
+    // then reference identical variables and cancel in the miter.
+    std::map<std::string, std::string> mem_cut_;   // "inst/PORT/bit" -> symbol
     static std::string mem_state_name(const std::string &anchor, int bit);
+    std::string ram_anchor(const Instance &inst, const std::string &pin, int width) const;
+    static std::string mem_cut_name(const std::string &ram, const std::string &pin, int bit);
     std::set<std::string> states_, free_nets_, inputs_;
     std::map<std::string, Lit> memo_;
     std::map<std::string, std::string> rename_;   // this side's net -> shared symbol
