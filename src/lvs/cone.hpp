@@ -22,8 +22,17 @@ namespace lvs {
 class Cones
 {
   public:
+    // memory_as_state makes a writable column's 64 stored bits state
+    // elements, so a design containing distributed RAM can be reasoned about
+    // at all.  Off by default, and deliberately: it is only half of what a
+    // COMPARISON needs.  The other side's RAM primitives have to become the
+    // same state symbols too, and until they do this side merely grows 64
+    // unmatched symbols and a 64-way mux per read -- strictly more work for
+    // strictly no more proof.  See tests/lvs_memstate_test.cpp for what the
+    // half that exists is proved to do.
     Cones(const Module &m, BoolNet &net,
-          const std::map<std::string, std::string> &rename = {});
+          const std::map<std::string, std::string> &rename = {},
+          bool memory_as_state = false);
 
     // Next-state of the register driving `state_name`, as a literal.
     Lit next_state(const std::string &state_name);
@@ -60,12 +69,22 @@ class Cones
     std::string n_for_output(const Instance &inst, const std::string &pin) const;
     Lit sym_state(const std::string &x);
 
+    bool memory_as_state_ = false;
     const Module &mod_;
     BoolNet &net_;
     std::map<std::string, Driver> driver_;   // net -> what drives it
     std::map<std::string, std::string> alias_;
     std::map<std::string, bool> const_net_;   // `assign n = 1'b0;` tie-offs
     std::map<std::string, const Instance *> ff_by_state_;
+    // A memory column's storage is state too, one symbol per stored bit.  It
+    // has no net of its own -- nothing in the netlist names bit 37 of a
+    // distributed RAM -- so the symbol is built from the net the column reads
+    // onto, which IS named and which both sides of a comparison can agree on.
+    // mem_by_state_ maps such a symbol back to the column that holds it, and
+    // mem_bit_ to which bit it is.
+    std::map<std::string, const Instance *> mem_by_state_;
+    std::map<std::string, int> mem_bit_;
+    static std::string mem_state_name(const std::string &anchor, int bit);
     std::set<std::string> states_, free_nets_, inputs_;
     std::map<std::string, Lit> memo_;
     std::map<std::string, std::string> rename_;   // this side's net -> shared symbol

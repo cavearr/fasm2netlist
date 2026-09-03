@@ -5,6 +5,16 @@ if(LVS_VERILOG_AVAILABLE)
   target_link_libraries(verilog_parse_test PRIVATE lvs_verilog)
   target_compile_options(verilog_parse_test PRIVATE -Wall -Wextra)
   add_test(NAME verilog_parse_test COMMAND verilog_parse_test)
+
+  # Distributed RAM modelled as state: the properties that make a modelled
+  # memory a memory -- hold, write, and leave the other bits alone -- each
+  # proved over every address and every input rather than sampled at one.
+  # Skipped (77) with no solver, like the other proof-based checks.
+  add_executable(lvs_memstate_test lvs_memstate_test.cpp ../src/lvs/cone.cpp)
+  target_link_libraries(lvs_memstate_test PRIVATE lvs_verilog lvs_miter)
+  target_compile_options(lvs_memstate_test PRIVATE -Wall -Wextra)
+  add_test(NAME lvs_memstate_test COMMAND lvs_memstate_test)
+  set_tests_properties(lvs_memstate_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Miter plumbing: the Boolean net, both export formats, and whichever

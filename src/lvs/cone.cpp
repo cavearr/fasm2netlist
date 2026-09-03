@@ -121,8 +121,9 @@ std::string Cones::resolve(std::string n) const
     return n;
 }
 
-Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::string> &rename)
-    : mod_(m), net_(net), rename_(rename)
+Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::string> &rename,
+             bool memory_as_state)
+    : memory_as_state_(memory_as_state), mod_(m), net_(net), rename_(rename)
 {
     for (const auto &p : m.ports)
         if (p.dir == PortDecl::Dir::Input || p.dir == PortDecl::Dir::Inout) {
@@ -202,6 +203,19 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             }
             // an xcol column holds two registers: the main FF on Q, and the
             // second FF observable on MUX when the output mux selects it
+            // A writable column stores 64 bits of state.  Enumerating them
+            // here is what puts them in states(), so the prover asks for a
+            // next-state function per stored bit the same way it does per
+            // flip-flop -- there is no separate kind of thing.
+            if (memory_as_state_ && is_xcol(inst.type) && pin.name == "O6" &&
+                param_str(inst, "RAM", "0") != "0") {
+                for (int b = 0; b < 64; b++) {
+                    std::string sn = mem_state_name(n, b);
+                    states_.insert(sn);
+                    mem_by_state_[sn] = &inst;
+                    mem_bit_[sn] = b;
+                }
+            }
             if (is_xcol(inst.type)) {
                 if (pin.name == "Q" && param_str(inst, "FF_SRC", "none") != "none") {
                     states_.insert(n);
@@ -318,11 +332,34 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             ins.push_back(p ? eval_expr(p->conn, depth + 1) : LIT_TRUE);   // unused inputs pull up
         }
         uint64_t init = parse_init(param_str(inst, "INIT", "0"));
-        if (pin == "O6")
-            return net_.mk_lut(ins, init);
-        if (pin == "O5") {
-            std::vector<Lit> five(ins.begin(), ins.begin() + 5);
-            return net_.mk_lut(five, init & 0xffffffffull);
+        bool is_ram = memory_as_state_ && param_str(inst, "RAM", "0") != "0";
+        if (pin == "O6" || pin == "O5") {
+            int width = (pin == "O6") ? 6 : 5;
+            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
+            if (!is_ram) {
+                // A fixed LUT: the contents are a constant, so the read is a
+                // truth table and no state is involved.
+                return (pin == "O6") ? net_.mk_lut(ins, init)
+                                     : net_.mk_lut(sel, init & 0xffffffffull);
+            }
+            // A writable column: the contents are STATE, so the read is a mux
+            // over the stored bits rather than over a constant. Built as a
+            // balanced tree from the low address bit up, which keeps it the
+            // same shape as mk_lut would have produced.
+            std::string anchor = n_for_output(inst, "O6");
+            std::vector<Lit> level;
+            level.reserve(1u << width);
+            for (int b = 0; b < (1 << width); b++)
+                level.push_back(sym_state(mem_state_name(anchor, b)));
+            for (int i = 0; i < width; i++) {
+                std::vector<Lit> next;
+                next.reserve(level.size() / 2);
+                for (size_t j = 0; j + 1 < level.size(); j += 2)
+                    next.push_back(net_.mk_or(net_.mk_and(negate(sel[i]), level[j]),
+                                              net_.mk_and(sel[i], level[j + 1])));
+                level.swap(next);
+            }
+            return level.front();
         }
         // The carry cell a column contributes to the chain.  O6 is the
         // propagate signal: it either passes the incoming carry along or
@@ -430,6 +467,14 @@ std::set<std::string> Cones::synonyms(const std::string &net) const
 }
 
 // the net an xcol drives from a given pin, as a state symbol name
+// A stored bit's state symbol.  Anchored on the column's read output so the
+// name exists on both sides of a comparison: match the columns and the memory
+// bits match with them, exactly as matching a register matches its state.
+std::string Cones::mem_state_name(const std::string &anchor, int bit)
+{
+    return anchor + "$m" + std::to_string(bit);
+}
+
 std::string Cones::n_for_output(const Instance &inst, const std::string &pin) const
 {
     const Pin *p = inst.find_pin(pin);
@@ -441,6 +486,37 @@ std::string Cones::n_for_output(const Instance &inst, const std::string &pin) co
 
 Lit Cones::next_state(const std::string &state_name)
 {
+    // A stored bit holds its value unless this cycle writes THIS bit: the
+    // write enable is asserted and the write address selects it.  That is the
+    // whole of a distributed RAM's state behaviour, and it is why the bits
+    // belong in states() rather than in some parallel mechanism.
+    auto mem = mem_by_state_.find(state_name);
+    if (mem != mem_by_state_.end()) {
+        const Instance &col = *mem->second;
+        int bit = mem_bit_.at(state_name);
+        auto pin_lit = [&](const char *p, Lit dflt) {
+            const Pin *q = col.find_pin(p);
+            return q ? eval_expr(q->conn, 0) : dflt;
+        };
+        Lit held = sym_state(state_name);
+        Lit we = pin_lit("WE", LIT_FALSE);
+        bool small = param_str(col, "RAM32", "0") != "0";
+
+        // The address this bit answers to. 32-deep columns are two memories
+        // sharing five address bits, so bit 5 picks the half rather than
+        // forming part of the address, and each half takes its own data.
+        int addr_bits = small ? 5 : 6;
+        Lit sel = LIT_TRUE;
+        for (int i = 0; i < addr_bits; i++) {
+            const Pin *w = col.find_pin("WA");
+            Lit a = w ? eval_bit(w->conn, i, 0) : LIT_FALSE;
+            sel = net_.mk_and(sel, ((bit >> i) & 1) ? a : negate(a));
+        }
+        Lit di = pin_lit(small && (bit & 32) ? "DI2" : "DI", LIT_FALSE);
+        Lit write = net_.mk_and(we, sel);
+        return net_.mk_or(net_.mk_and(write, di), net_.mk_and(negate(write), held));
+    }
+
     auto it = ff_by_state_.find(state_name);
     if (it == ff_by_state_.end())
         throw std::runtime_error("cone: no register drives " + state_name);
