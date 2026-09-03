@@ -19,6 +19,9 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include "json.hpp"
+
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -99,6 +102,7 @@ static int run(int argc, char **argv)
     // miter between them ask about the same variables.  Without it the two
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
+    std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
 
     // Build the register correspondence here rather than in a helper script:
     // it is a filter on this program's own input, and it needs nothing but the
@@ -111,6 +115,9 @@ static int run(int argc, char **argv)
             return r;
         };
         for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
+        mem_cuts = rm.mem;
+        if (!mem_cuts.empty())
+            std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
         std::cout << "register map: " << rm.mapped << " from the placement";
         if (rm.skipped) std::cout << ", " << rm.skipped << " unmapped";
         std::cout << " (gold module " << rm.module << ")\n";
@@ -148,6 +155,7 @@ static int run(int argc, char **argv)
         gate_to_gold.swap(resolved);
     }
     Cones gate(*gate_m, net, gate_to_gold);
+    gate.set_mem_cuts(mem_cuts);
 
     // Match by any shared name, not just an identical one.  With --map the
     // gate's states already carry the gold's names, so this is an equality.
@@ -225,6 +233,43 @@ static int run(int argc, char **argv)
         }
         std::string label = bit < 0 ? port : port + "[" + std::to_string(bit) + "]";
         check(label, gold.output_bit(port, bit < 0 ? 0 : bit), gate.output_bit(port, bit < 0 ? 0 : bit));
+    }
+
+    // The memories.  Their contents were cut, so what is left to prove is the
+    // boundary: read address, write address, write data, write enable.  Prove
+    // those equal and the contents are equal by construction -- which is both
+    // why the cut is sound and what checks the pairing that made it.
+    if (!mem_cuts.empty()) {
+        const auto &gp = gold.mem_ports();
+        const auto &tp = gate.mem_ports();
+        // Pair by the symbol a memory's first read produces: the placement
+        // already renamed the gate's to the gold's, so equal symbols are the
+        // paired memories, whatever either side calls anything else.
+        std::map<std::string, const Cones::MemPort *> by_sym;
+        for (const auto &m : gp)
+            if (!m.out_sym.empty()) by_sym[m.out_sym.front()] = &m;
+        int mem_pairs = 0;
+        for (const auto &t : tp) {
+            if (t.out_sym.empty()) continue;
+            auto want = mem_cuts.find(t.out_sym.front());
+            if (want == mem_cuts.end()) continue;
+            auto g = by_sym.find(want->second);
+            if (g == by_sym.end()) continue;
+            mem_pairs++;
+            const Cones::MemPort &G = *g->second;
+            auto vec = [&](const char *what, const std::vector<Lit> &a, const std::vector<Lit> &b) {
+                size_t n = std::max(a.size(), b.size());
+                for (size_t i = 0; i < n; i++)
+                    check(t.where + " " + what + "[" + std::to_string(i) + "]",
+                          i < b.size() ? b[i] : LIT_FALSE, i < a.size() ? a[i] : LIT_FALSE);
+            };
+            vec("read address", t.read_addr, G.read_addr);
+            vec("write address", t.write_addr, G.write_addr);
+            vec("write data", t.write_data, G.write_data);
+            check(t.where + " write enable", G.write_enable, t.write_enable);
+        }
+        std::cout << "memories: " << gp.size() << " gold, " << tp.size() << " gate, "
+                  << mem_pairs << " paired and checked at the boundary\n";
     }
 
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

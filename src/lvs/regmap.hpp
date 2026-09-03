@@ -18,6 +18,11 @@ namespace lvs {
 struct RegMap {
     // raw "TILE/WIRE" endpoint -> the source signal name, e.g. "led_int[2]"
     std::map<std::string, std::string> net;
+    // Memory pairing: the read symbol a fabric column produces -> the one its
+    // synthesis counterpart produces.  A memory's contents are cut rather than
+    // modelled, so this is all a comparison needs from it: give both sides the
+    // same symbols and what is left to prove is the boundary.
+    std::map<std::string, std::string> mem;
     std::string module;         // the gold module the labels came from
     int mapped = 0, skipped = 0;
 };

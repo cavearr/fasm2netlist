@@ -35,8 +35,18 @@ class Cones
         Lit write_enable = LIT_FALSE;
         std::vector<std::string> out_sym;  // the cut symbol each data bit reads
     };
-    // Every memory port in this module, in a stable order.
-    const std::vector<MemPort> &mem_ports() const { return mem_ports_; }
+    // Every memory port in this module, in a stable order.  Built on demand:
+    // it evaluates cones, so it cannot run before construction finishes.
+    const std::vector<MemPort> &mem_ports()
+    {
+        if (!mem_ports_built_) { mem_ports_built_ = true; collect_mem_ports(); }
+        return mem_ports_;
+    }
+    // Give a memory's reads the symbols its counterpart uses.  This is the
+    // whole of pairing: two memories are the same one when their reads are
+    // the same variables, and what justifies saying so is that their
+    // boundaries prove equal.
+    void set_mem_cuts(const std::map<std::string, std::string> &cuts) { mem_cut_ = cuts; }
 
     // memory_as_state makes a writable column's 64 stored bits state
     // elements, so a design containing distributed RAM can be reasoned about
@@ -102,6 +112,8 @@ class Cones
     std::map<std::string, int> mem_bit_;
     std::map<std::string, char> mem_port_;   // gold RAMs only: which port holds it
     std::vector<MemPort> mem_ports_;
+    bool mem_ports_built_ = false;
+    void collect_mem_ports();
     // The symbol a memory's data bit reads.  Paired memories are given the
     // same one, which is the whole of how a cut point works: downstream cones
     // then reference identical variables and cancel in the miter.

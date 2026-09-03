@@ -271,6 +271,59 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
     }
 }
 
+void Cones::collect_mem_ports()
+{
+    auto bits_of = [&](const Instance &inst, const std::string &pin, int n) {
+        std::vector<Lit> v;
+        const Pin *p = inst.find_pin(pin);
+        for (int i = 0; i < n; i++) v.push_back(p ? eval_bit(p->conn, i, 0) : LIT_FALSE);
+        return v;
+    };
+    auto lit_of = [&](const Instance &inst, const std::string &pin, Lit dflt) {
+        const Pin *p = inst.find_pin(pin);
+        return p ? eval_expr(p->conn, 0) : dflt;
+    };
+
+    for (const auto &inst : mod_.instances) {
+        if (RAM_PORTS.count(inst.type)) {
+            // One MemPort per data port; each is 64 stored bits, which is one
+            // fabric column, which is what makes them pairable one to one.
+            int width = RAM_PORTS.at(inst.type);
+            int abits = (width == 1) ? 6 : 5;
+            for (char port = 'A'; port <= 'D'; port++) {
+                std::string dopin = std::string("DO") + port;
+                if (!inst.find_pin(dopin)) continue;
+                MemPort mp;
+                mp.where = inst.name + " port " + port;
+                mp.read_addr = bits_of(inst, std::string("ADDR") + port, abits);
+                mp.write_addr = bits_of(inst, "ADDRD", abits);
+                mp.write_data = bits_of(inst, std::string("DI") + port, width);
+                mp.write_enable = lit_of(inst, "WE", LIT_FALSE);
+                for (int d = 0; d < width; d++)
+                    mp.out_sym.push_back(mem_cut_name(inst.name, dopin, d));
+                mem_ports_.push_back(std::move(mp));
+            }
+            continue;
+        }
+        if (!is_xcol(inst.type) || param_str(inst, "RAM", "0") == "0") continue;
+        bool small = param_str(inst, "RAM32", "0") != "0";
+        int abits = small ? 5 : 6;
+        MemPort mp;
+        mp.where = inst.name;
+        for (int i = 0; i < abits; i++) {
+            const Pin *a = inst.find_pin("A" + std::to_string(i + 1));
+            mp.read_addr.push_back(a ? eval_expr(a->conn, 0) : LIT_FALSE);
+        }
+        mp.write_addr = bits_of(inst, "WA", abits);
+        mp.write_data.push_back(lit_of(inst, "DI", LIT_FALSE));
+        if (small) mp.write_data.push_back(lit_of(inst, "DI2", LIT_FALSE));
+        mp.write_enable = lit_of(inst, "WE", LIT_FALSE);
+        for (int d = 0; d < (small ? 2 : 1); d++)
+            mp.out_sym.push_back(mem_cut_name(inst.name, "DO", d));
+        mem_ports_.push_back(std::move(mp));
+    }
+}
+
 Lit Cones::eval_expr(const Expr &e, int depth)
 {
     switch (e.kind) {
@@ -406,10 +459,13 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
                 // writable column reads is a free symbol, and the column it is
                 // paired with gets the same one.  O6 and O5 are the two halves
                 // of the one memory, so they are two different bits of it.
-                // A column's O6 and O5 are the two halves of one memory, so
-                // they are bits 1 and 0 of its data -- the same two bits the
-                // synthesis side calls DOx[1] and DOx[0].
-                std::string key = mem_cut_name(inst.name, "DO", pin == "O6" ? 1 : 0);
+                // Which data bit this read is.  A 64-deep column has one --
+                // O6, the whole address -- and matches a RAM64M port's single
+                // DOx.  A 32-deep column has two halves, and they are the two
+                // bits a RAM32M port calls DOx[1] and DOx[0].
+                bool small = param_str(inst, "RAM32", "0") != "0";
+                int d = small ? (pin == "O6" ? 1 : 0) : 0;
+                std::string key = mem_cut_name(inst.name, "DO", d);
                 auto c = mem_cut_.find(key);
                 return net_.input(c == mem_cut_.end() ? key : c->second);
             }

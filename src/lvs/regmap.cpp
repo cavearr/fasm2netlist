@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <regex>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -106,6 +107,50 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                 return tt_pins[type][i];
         return none;
     };
+
+    // Memories.  A placement cell called "<ram>/DPR<n>" at a site's <col>6LUT
+    // is port n of that synthesis RAM held in that fabric column.  The
+    // netlists name the site differently -- the placement absolutely
+    // (SLICE_X42Y136), the fabric by the local suffix FASM uses (SLICEM_X0) --
+    // so the ordinal has to be recovered here, where the tile grid is already
+    // open.
+    {
+        static const std::regex dpr(R"(^(.*)/DPR(\d)(?:_(\d))?$)");
+        auto sanitise = [](const std::string &in) {
+            std::string r;
+            for (char c : in) r.push_back(isalnum((unsigned char)c) ? c : '_');
+            return r;
+        };
+        for (const auto &pv : place.members()) {
+            if (pv.second.get("type").asString() != "SLICE_LUTX") continue;
+            std::smatch m;
+            const std::string cell = pv.first;
+            if (!std::regex_match(cell, m, dpr)) continue;
+            std::string bel = pv.second.get("bel").asString();
+            if (bel.empty() || bel[0] < 'A' || bel[0] > 'D') continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::vector<std::pair<int, std::string>> sl;
+            for (const auto &sv : tv.get("sites").members())
+                if (sv.first.rfind("SLICE_X", 0) == 0)
+                    sl.push_back({atoi(sv.first.c_str() + 7), sv.first});
+            std::sort(sl.begin(), sl.end());
+            int ord = -1;
+            for (size_t i = 0; i < sl.size(); i++)
+                if (sl[i].second == site) ord = int(i);
+            if (ord < 0) continue;
+            std::string stype = tv.get("sites").get(site).asString();
+            std::string gate = sanitise(tile + "_" + stype + "_X" + std::to_string(ord) + "_" +
+                                        std::string(1, bel[0]));
+            char port = char('A' + (m[2].str()[0] - '0'));
+            int nbits = m[3].matched ? 2 : 1;
+            for (int d = 0; d < nbits; d++)
+                out.mem[gate + ":DO[" + std::to_string(d) + "]"] =
+                    m[1].str() + ":DO" + port + "[" + std::to_string(d) + "]";
+        }
+    }
 
     for (const auto &pv : place.members()) {
         if (pv.second.get("type").asString() != "SLICE_FFX")
