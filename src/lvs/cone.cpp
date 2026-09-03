@@ -298,6 +298,13 @@ void Cones::collect_mem_ports()
                 mp.read_addr = bits_of(inst, std::string("ADDR") + port, abits);
                 mp.write_addr = bits_of(inst, "ADDRD", abits);
                 mp.write_data = bits_of(inst, std::string("DI") + port, width);
+                {
+                    const Pin *dp = inst.find_pin(std::string("DI") + port);
+                    bool dc = !dp || (dp->conn.kind == Expr::Kind::Const &&
+                                      dp->conn.const_text.find('x') != std::string::npos) ||
+                              dp->conn.kind == Expr::Kind::Unconnected;
+                    mp.write_dontcare.assign(width, dc);
+                }
                 mp.write_enable = lit_of(inst, "WE", LIT_FALSE);
                 for (int d = 0; d < width; d++)
                     mp.out_sym.push_back(mem_cut_name(inst.name, dopin, d));

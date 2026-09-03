@@ -265,7 +265,15 @@ static int run(int argc, char **argv)
             };
             vec("read address", t.read_addr, G.read_addr);
             vec("write address", t.write_addr, G.write_addr);
-            vec("write data", t.write_data, G.write_data);
+            {
+                size_t n = std::max(t.write_data.size(), G.write_data.size());
+                for (size_t i = 0; i < n; i++) {
+                    if (i < G.write_dontcare.size() && G.write_dontcare[i]) continue;
+                    check(t.where + " write data[" + std::to_string(i) + "]",
+                          i < G.write_data.size() ? G.write_data[i] : LIT_FALSE,
+                          i < t.write_data.size() ? t.write_data[i] : LIT_FALSE);
+                }
+            }
             check(t.where + " write enable", G.write_enable, t.write_enable);
         }
         std::cout << "memories: " << gp.size() << " gold, " << tp.size() << " gate, "

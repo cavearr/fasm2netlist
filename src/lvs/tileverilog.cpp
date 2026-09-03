@@ -812,7 +812,24 @@ endmodule
                 std::string w;
                 for (int i = 6; i >= 1; i--) w += (i < 6 ? ", " : "") + net("D" + std::to_string(i));
                 wa = "{" + w + "}";
-                di = col.di1 == Di1Src::OwnI ? net(C + "I") : net("DI");
+                // The DI1 mux is a CHAIN, not a per-column choice: a column
+                // with no DI1MUX feature of its own does not fall back to the
+                // shared DI pin, it takes whatever the column below resolved
+                // to.  A takes AI, or failing that B's choice; B takes BI or
+                // DI; C takes CI or DI; D always takes DI.  Reading it as a
+                // per-column default writes column A from the wrong pin
+                // whenever B is the one holding the write data.
+                auto di_of = [&](char x) {
+                    auto own = [&](char y) {
+                        auto it = sc.columns.find(y);
+                        return it != sc.columns.end() && it->second.di1 == Di1Src::OwnI;
+                    };
+                    if (x == 'A') return own('A') ? net("AI") : own('B') ? net("BI") : net("DI");
+                    if (x == 'B') return own('B') ? net("BI") : net("DI");
+                    if (x == 'C') return own('C') ? net("CI") : net("DI");
+                    return net("DI");
+                };
+                di = di_of(c);
                 di2 = net(C + "X");
                 we = sc.we_from_ce ? net("CE") : net("WE");
             }

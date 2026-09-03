@@ -32,6 +32,11 @@ class Cones
         std::vector<Lit> read_addr;        // what a read selects
         std::vector<Lit> write_addr;       // ...and what a write selects
         std::vector<Lit> write_data;       // data, low bit first
+        // Bits the synthesis side left as x.  A memory port that is only ever
+        // read has no write data to speak of, and yosys says so; comparing the
+        // fabric's real signal against a don't-care asks a question with no
+        // answer, so those bits are not obligations.
+        std::vector<bool> write_dontcare;
         Lit write_enable = LIT_FALSE;
         std::vector<std::string> out_sym;  // the cut symbol each data bit reads
     };
