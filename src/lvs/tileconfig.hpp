@@ -30,6 +30,11 @@ enum class FF5Src { O5, BypassX };
 // What the column's xMUX output carries.
 enum class OutMux { None, O6, O5, Xor, Q5, Carry, F7, F8, MC31 };
 
+// Where a memory column's write data comes from.  The DI1 mux is per column
+// and its choices are the slice's own DI pins; a column with no DI1MUX feature
+// takes the shared DI pin.
+enum class Di1Src { DI, OwnI, Chain };
+
 // Where the slice's carry chain starts.  Established from
 // 017-clb-precyinit: one feature per value, 400 cases, no overlap.
 enum class PreCyInit { None, Zero, One, AX, CIN };
@@ -38,6 +43,7 @@ const char *to_string(FFSrc s);
 const char *to_string(FF5Src s);
 const char *to_string(OutMux s);
 const char *to_string(PreCyInit s);
+const char *to_string(Di1Src s);
 
 struct ColumnConfig
 {
@@ -62,6 +68,15 @@ struct ColumnConfig
     // cases, present <-> clb_NCY0_O5, absent <-> clb_NCY0_MX.
     bool carry_used = false;
     bool cy0_o5 = false;
+
+    // Distributed RAM.  ram makes this column's LUT storage writable; small
+    // splits it into two 32-deep halves.  Established from 018-clb-ram and
+    // 019-clb-ndi1mux.  A column with ram set reads exactly as it did before --
+    // the read path IS the LUT read -- so the only new behaviour is the write
+    // port, which is why the model can express it without a second cell.
+    bool ram = false;
+    bool ram_small = false;
+    Di1Src di1 = Di1Src::DI;
 };
 
 struct SliceConfig
@@ -69,6 +84,10 @@ struct SliceConfig
     std::string tile, tile_type, site;   // e.g. CLBLM_R_X31Y135, CLBLM_R, SLICEM_X0
     bool ffsync = false, clkinv = false, srusedmux = false, ceusedmux = false;
     PreCyInit precyinit = PreCyInit::None;
+    // Memory write control, shared by every column of the slice.
+    bool we_from_ce = false;   // WEMUX.CE: the write enable is the CE pin, not WE
+    bool wa7used = false;      // the write address extends past 6 bits...
+    bool wa8used = false;      // ...and past 7
     std::map<char, ColumnConfig> columns;
     std::vector<std::string> unhandled;  // features this decoder does not model
 };

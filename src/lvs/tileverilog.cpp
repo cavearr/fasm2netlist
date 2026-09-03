@@ -20,8 +20,12 @@
 //     not modelled.  F7/F8 has no site feature at all, so it cannot be seen
 //     from here even in principle -- see tests/lvs/harness/README.md.
 //   - CE defaults to 1 and SR to 0 unless CEUSEDMUX / SRUSEDMUX say otherwise.
-//   - carry, distributed RAM and SRL are absent: a slice using them still gets
-//     an instance, and its unmodelled features are listed on stderr.
+//   - carry and distributed RAM are modelled; SRL is not, and a slice using
+//     one still gets an instance with its unmodelled features listed on
+//     stderr.  Note that lvs_equiv keeps its OWN column model in cone.cpp and
+//     reads a column's contents as a constant, so a memory here is honest for
+//     simulation but not yet provable: the memory bits have to become state
+//     there before a design using one can pass.
 #include "json.hpp"
 #include "lvs/regmap.hpp"
 #include "lvs/tileconfig.hpp"
@@ -652,6 +656,8 @@ int main(int argc, char **argv)
 // this model does not implement resolve to 0 and are reported by the emitter.
 module xcol #(
     parameter [63:0] INIT = 64'h0,
+    parameter RAM     = 0,        // 1 = the LUT storage is writable
+    parameter RAM32   = 0,        // 1 = two 32-deep halves rather than one 64
     parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | none
     parameter FF5_SRC = "none",   // O5 | X | none
     parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | none
@@ -662,12 +668,36 @@ module xcol #(
 ) (
     input  wire A1, A2, A3, A4, A5, A6, X,
     input  wire CLK, CE, SR, CI,
+    input  wire [5:0] WA,         // write address, shared by the whole slice
+    input  wire DI, DI2, WE,      // write data (DI2 = the upper half when 32-deep)
     output wire O6, O5, Q, MUX, CO
 );
     wire [5:0] idx6 = {A6, A5, A4, A3, A2, A1};
     wire [5:0] idx5 = {1'b0, A5, A4, A3, A2, A1};
-    assign O6 = INIT[idx6];
-    assign O5 = INIT[idx5];
+
+    // Distributed RAM is this same storage made writable: the read path is
+    // unchanged -- it IS the LUT read -- so the only new behaviour is a write
+    // port, and a column with RAM=0 reduces to exactly the constant it was.
+    //
+    // 64 deep: one memory, written at WA from DI.
+    // 32 deep: TWO memories in the one LUT, each five bits deep.  The low half
+    // is what O5 reads and the high half what O6 reads with A6 high, so they
+    // take separate write data -- DI and DI2 -- at the same address.  Treating
+    // this as one 64-deep memory with a six-bit address would write one half
+    // and leave the other holding its initial contents for ever.
+    reg [63:0] mem = INIT;
+    always @(posedge CLK)
+        if (RAM && WE) begin
+            if (RAM32) begin
+                mem[{1'b0, WA[4:0]}] <= DI;
+                mem[{1'b1, WA[4:0]}] <= DI2;
+            end else begin
+                mem[WA] <= DI;
+            end
+        end
+
+    assign O6 = mem[idx6];
+    assign O5 = mem[idx5];
 
     // CARRY4, one bit of it: O6 is the propagate select, and the data input
     // is O5 or the bypass depending on CY0.  CO ripples to the next column,
@@ -770,11 +800,28 @@ endmodule
             const ColumnConfig &col = cc.second;
             if (!col.init && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
             std::string C(1, c);
+            // Distributed RAM.  The write address is one per SLICE, not one
+            // per column -- it arrives on the slice's WA pins, which the D
+            // column's address inputs drive -- so every column of a memory
+            // writes at the same place while each reads at its own.  The
+            // write data is per column, chosen by that column's DI1 mux;
+            // DI2 is the second datum the 32-deep mode needs, and it is the
+            // column's X bypass pin.
+            std::string wa = "6'b0", di = "1'b0", di2 = "1'b0", we = "1'b0";
+            if (col.ram) {
+                std::string w;
+                for (int i = 6; i >= 1; i--) w += (i < 6 ? ", " : "") + net("D" + std::to_string(i));
+                wa = "{" + w + "}";
+                di = col.di1 == Di1Src::OwnI ? net(C + "I") : net("DI");
+                di2 = net(C + "X");
+                we = sc.we_from_ce ? net("CE") : net("WE");
+            }
             const char *ffsrc = col.ff_used ? (col.ff_src_explicit ? to_string(col.ff_src) : "O6") : "none";
             const char *ff5src = col.ff5_used ? (col.ff5_src_explicit ? to_string(col.ff5_src) : "O5") : "none";
             std::ostringstream initv;
             initv << "64'h" << std::hex << (col.init ? *col.init : 0);
-            body << "  xcol #(." << "INIT(" << initv.str() << "), .FF_SRC(\"" << ffsrc
+            body << "  xcol #(." << "INIT(" << initv.str() << "), .RAM(" << (col.ram ? 1 : 0)
+               << "), .RAM32(" << (col.ram && col.ram_small ? 1 : 0) << "), .FF_SRC(\"" << ffsrc
                << "\"), .FF5_SRC(\"" << ff5src << "\"), .OUTMUX(\"" << to_string(col.outmux)
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
@@ -793,6 +840,7 @@ endmodule
                // column outside a chain still has the pin, tied low, because
                // the model's XOR and CY paths read it unconditionally.
                << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "),\n"
+               << "     .WA(" << wa << "), .DI(" << di << "), .DI2(" << di2 << "), .WE(" << we << "),\n"
                << "     .O6(" << net(C) << "), .O5(), .Q(" << net(C + "Q")
                << "), .MUX(" << net(C + "MUX") << "), .CO("
                << (co_of.count(c) ? co_of[c] : std::string()) << "));\n";

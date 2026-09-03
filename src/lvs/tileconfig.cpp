@@ -31,6 +31,14 @@ const char *to_string(PreCyInit s)
     default: return "none";
     }
 }
+const char *to_string(Di1Src s)
+{
+    switch (s) {
+    case Di1Src::OwnI: return "own";
+    case Di1Src::Chain: return "chain";
+    default: return "DI";
+    }
+}
 const char *to_string(OutMux s)
 {
     switch (s) {
@@ -263,6 +271,21 @@ DesignConfig read_fasm(const std::string &path)
             else if (sel == "F8") cc.outmux = OutMux::F8;
             else if (sel == "MC31") cc.outmux = OutMux::MC31;
             else sc.unhandled.push_back(rest);
+        } else if (col_ok && tail == "LUT.RAM") {
+            column(c).ram = true;
+        } else if (col_ok && tail == "LUT.SMALL") {
+            column(c).ram_small = true;
+        } else if (col_ok && tail.rfind("LUT.DI1MUX.", 0) == 0) {
+            // <col>I selects the column's own write-data pin; anything else
+            // is the chain that walks write data down from the column above.
+            std::string sel = tail.substr(11);
+            column(c).di1 = (sel == std::string(1, c) + "I") ? Di1Src::OwnI : Di1Src::Chain;
+        } else if (rest == "WEMUX.CE") {
+            sc.we_from_ce = true;
+        } else if (rest == "WA7USED") {
+            sc.wa7used = true;
+        } else if (rest == "WA8USED") {
+            sc.wa8used = true;
         } else {
             sc.unhandled.push_back(rest + (value.empty() ? "" : " = " + value));
         }
@@ -278,6 +301,9 @@ void DesignConfig::dump(std::ostream &os) const
            << (sc.srusedmux ? " sr" : "") << (sc.ceusedmux ? " ce" : "");
         if (sc.precyinit != PreCyInit::None)
             os << " precyinit=" << to_string(sc.precyinit);
+        if (sc.we_from_ce) os << " we=CE";
+        if (sc.wa7used) os << " wa7";
+        if (sc.wa8used) os << " wa8";
         os << "\n";
         for (const auto &[c, cc] : sc.columns) {
             os << "  col " << c;
@@ -294,6 +320,7 @@ void DesignConfig::dump(std::ostream &os) const
                    << ",init=" << cc.ff5_init << ",srval=" << cc.ff5_srval;
             os << " outmux=" << to_string(cc.outmux);
             if (cc.carry_used) os << " cy0=" << (cc.cy0_o5 ? "O5" : "X");
+            if (cc.ram) os << " ram=" << (cc.ram_small ? "32" : "64") << " di1=" << to_string(cc.di1);
             os << "\n";
         }
         for (const auto &u : sc.unhandled)
