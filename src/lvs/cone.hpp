@@ -131,9 +131,9 @@ class Cones
     // same one, which is the whole of how a cut point works: downstream cones
     // then reference identical variables and cancel in the miter.
     std::map<std::string, std::string> mem_cut_;   // "inst/PORT/bit" -> symbol
-    // A block RAM is cut per data-output BIT, so the symbol has to be found
-    // from the net rather than from the pin: one pin carries sixteen of them.
-    std::map<std::string, std::string> bram_out_;  // net -> its cut symbol
+    // A memory is cut per data-output BIT, so the symbol has to be found from
+    // the net rather than from the pin: one pin can carry thirty-two of them.
+    std::map<std::string, std::string> mem_out_;   // net -> its cut symbol
     static std::string mem_state_name(const std::string &anchor, int bit);
     std::string ram_anchor(const Instance &inst, const std::string &pin, int width) const;
     static std::string mem_cut_name(const std::string &ram, const std::string &pin, int bit);

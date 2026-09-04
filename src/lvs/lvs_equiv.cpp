@@ -33,7 +33,7 @@ void usage()
 {
     std::cerr << "usage: lvs_equiv --gold <a.v> --gate <b.v> [--top NAME]\n"
                  "                 [--solver libz3|'cmd'] [--format dimacs|smt2]\n"
-                 "                 [--dump-prefix PATH] [--quiet]\n"
+                 "                 [--dump-prefix PATH] [--quiet] [--explain]\n"
                  "\n"
                  "  --solver libz3  the linked library, one incremental session"
               << (have_linked_z3() ? " (default)\n" : " -- NOT IN THIS BUILD\n")
@@ -59,6 +59,8 @@ static int run(int argc, char **argv)
     std::string placement_p, gold_json_p, db, device;
     Solver solver{have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
     bool quiet = false;
+    // --explain: after a failure, say which named variables each side reads.
+    bool explain = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -70,6 +72,7 @@ static int run(int argc, char **argv)
         else if (a == "--gate-top") gate_top = next();
         else if (a == "--solver") solver.command = next();
         else if (a == "--dump-prefix") dump_prefix = next();
+        else if (a == "--explain") explain = true;
         else if (a == "--map") map_path = next();
         else if (a == "--compare") { std::string g = next(); compare.push_back({g, next()}); }
         else if (a == "--placement") placement_p = next();
@@ -236,6 +239,34 @@ static int run(int argc, char **argv)
     int proved = 0, differ = 0, unknown = 0;
     auto t0 = std::chrono::steady_clock::now();
 
+    // Which named variables a cone actually reads.  A miter that fails says
+    // only "these two are not the same function"; the supports say whether the
+    // two sides are even looking at the same inputs, which is the difference
+    // between a logic error and a correspondence error -- and the second is
+    // what nearly every failure here has turned out to be.
+    std::map<uint32_t, std::string> input_of;
+    auto support = [&](Lit l) {
+        if (input_of.size() != net.input_order().size()) {
+            input_of.clear();
+            for (const auto &n : net.input_order()) input_of[node_of(net.input_lit(n))] = n;
+        }
+        std::set<std::string> out;
+        std::vector<uint32_t> stack{node_of(l)};
+        std::set<uint32_t> seen;
+        while (!stack.empty()) {
+            uint32_t n = stack.back();
+            stack.pop_back();
+            if (n == 0 || !seen.insert(n).second) continue;
+            auto in = input_of.find(n);
+            if (in != input_of.end()) { out.insert(in->second); continue; }
+            auto a = net.ands().find(n);
+            if (a == net.ands().end()) continue;
+            stack.push_back(node_of(a->second.a));
+            stack.push_back(node_of(a->second.b));
+        }
+        return out;
+    };
+
     auto check = [&](const std::string &label, Lit a, Lit b) {
         Lit miter = net.mk_xor(a, b);
         if (!dump_prefix.empty()) {
@@ -247,7 +278,35 @@ static int run(int argc, char **argv)
         }
         Result r = session->check(miter);
         if (r == Result::Unsat) { proved++; if (!quiet) std::cout << "  proved  " << label << "\n"; }
-        else if (r == Result::Sat) { differ++; std::cout << "  DIFFER  " << label << "\n"; }
+        else if (r == Result::Sat) {
+            differ++;
+            std::cout << "  DIFFER  " << label << "\n";
+            if (explain) {
+                std::set<std::string> ga = support(a), gb = support(b);
+                std::vector<std::string> only_a, only_b;
+                std::set_difference(ga.begin(), ga.end(), gb.begin(), gb.end(),
+                                    std::back_inserter(only_a));
+                std::set_difference(gb.begin(), gb.end(), ga.begin(), ga.end(),
+                                    std::back_inserter(only_b));
+                // How many names to print per side.  Six is enough to see the
+                // shape of a failure; a bigger number is for reading one
+                // failure closely, which is why it is settable.
+                size_t explain_cap = 6;
+                if (const char *e = getenv("LVS_EXPLAIN_CAP")) explain_cap = size_t(atoi(e));
+                auto few = [&](const char *what, const std::vector<std::string> &v) {
+                    if (v.empty()) return;
+                    std::cout << "            " << what << " (" << v.size() << "):";
+                    for (size_t i = 0; i < v.size() && i < explain_cap; i++) std::cout << " " << v[i];
+                    if (v.size() > explain_cap) std::cout << " ...";
+                    std::cout << "\n";
+                };
+                if (only_a.empty() && only_b.empty())
+                    std::cout << "            same " << ga.size()
+                              << " inputs on both sides, so the logic itself differs\n";
+                few("only the first side reads", only_a);
+                few("only the second side reads", only_b);
+            }
+        }
         else { unknown++; std::cout << "  unknown " << label << "\n"; }
     };
 

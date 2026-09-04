@@ -14,18 +14,21 @@
 //
 // BEST GUESSES, all of them in the model and none of them elsewhere:
 //   - O6 = INIT[{A6..A1}], O5 = the low half read with A6 low.
-//   - the main FF takes O6 / O5 / the X bypass; XOR, CY, MC31 and F7/F8 are
-//     NOT modelled and select a tied 0 (the instance reports it).
-//   - the xMUX carries O6, O5 or the 5FF's Q; the same four selects above are
-//     not modelled.  F7/F8 has no site feature at all, so it cannot be seen
-//     from here even in principle -- see tests/lvs/harness/README.md.
+//   - the main FF takes O6 / O5 / the X bypass / the slice's wide mux; XOR,
+//     CY and MC31 are NOT modelled and select a tied 0 (the instance reports
+//     it).
+//   - the xMUX carries O6, O5, the 5FF's Q or the wide mux; XOR, CY and MC31
+//     are not modelled.  F7/F8 has no site feature saying the mux EXISTS,
+//     only features saying a column reads one, so the tree is built wherever
+//     a column selects it, wired as nextpnr's own packer wires it.
 //   - CE defaults to 1 and SR to 0 unless CEUSEDMUX / SRUSEDMUX say otherwise.
 //   - carry and distributed RAM are modelled; SRL is not, and a slice using
 //     one still gets an instance with its unmodelled features listed on
-//     stderr.  Note that lvs_equiv keeps its OWN column model in cone.cpp and
-//     reads a column's contents as a constant, so a memory here is honest for
-//     simulation but not yet provable: the memory bits have to become state
-//     there before a design using one can pass.
+//     stderr.  Block RAM is not modelled either, but it is CUT: the block is
+//     instantiated with its pins wired and nothing inside, so a comparison
+//     can treat its reads as free variables and its inputs as obligations.
+//     lvs_equiv keeps its OWN column model in cone.cpp and must agree with
+//     this one; the two are kept honest by the examples, not by sharing code.
 #include "json.hpp"
 #include "lvs/regmap.hpp"
 #include "lvs/tileconfig.hpp"
@@ -766,15 +769,21 @@ module xcol #(
     parameter [63:0] INIT = 64'h0,
     parameter RAM     = 0,        // 1 = the LUT storage is writable
     parameter RAM32   = 0,        // 1 = two 32-deep halves rather than one 64
-    parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | none
+    parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | F7F8 | none
     parameter FF5_SRC = "none",   // O5 | X | none
-    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | none
+    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | F7 | F8 | none
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
     parameter SYNC = 1'b1
 ) (
     input  wire A1, A2, A3, A4, A5, A6, X,
+    // The wide multiplexer that reaches this column.  It is built OUTSIDE the
+    // column, from two neighbouring columns' O6 and one of the slice's bypass
+    // pins, because that is where it physically is -- a column cannot see its
+    // neighbour's LUT, and pretending otherwise here would put the wiring in
+    // the one place that cannot get it right.
+    input  wire FX,
     input  wire CLK, CE, SR, CI,
     input  wire [5:0] WA,         // write address, shared by the whole slice
     input  wire DI, DI2, WE,      // write data (DI2 = the upper half when 32-deep)
@@ -816,7 +825,7 @@ module xcol #(
 
     wire ff_d  = (FF_SRC  == "O6")  ? O6 : (FF_SRC  == "O5") ? O5 :
                  (FF_SRC  == "X")   ? X  : (FF_SRC  == "XOR") ? xo :
-                 (FF_SRC  == "CY")  ? CO : 1'b0;
+                 (FF_SRC  == "CY")  ? CO : (FF_SRC == "F7F8") ? FX : 1'b0;
     wire ff5_d = (FF5_SRC == "O5") ? O5 : (FF5_SRC == "X")  ? X  : 1'b0;
 
     reg q = FF_INIT, q5 = FF5_INIT;
@@ -836,7 +845,8 @@ module xcol #(
     assign Q   = q;
     assign MUX = (OUTMUX == "O6")  ? O6 : (OUTMUX == "O5") ? O5 :
                  (OUTMUX == "5Q")  ? q5 : (OUTMUX == "XOR") ? xo :
-                 (OUTMUX == "CY")  ? CO : 1'b0;
+                 (OUTMUX == "CY")  ? CO :
+                 (OUTMUX == "F7" || OUTMUX == "F8") ? FX : 1'b0;
 endmodule
 
 )";
@@ -854,6 +864,9 @@ endmodule
     // slice instances (built first: slice outputs count as driven)
     std::ostringstream body;
     std::vector<std::string> carry_wires;
+    // Nets this model invents rather than reads out of the fabric: the outputs
+    // of a slice's wide multiplexers and of a block RAM's pin inverters.
+    std::vector<std::string> helper_wires;
     std::vector<std::pair<std::string, std::string>> carry_assigns;
     int inst = 0, unmodelled = 0;
     for (const auto &kv : dc.slices) {
@@ -901,6 +914,51 @@ endmodule
             }
             std::string cout_pin = net("COUT");
             if (cout_pin != "1'b0") carry_assigns.push_back({cout_pin, co_of['D']});
+        }
+
+        // The wide multiplexers.  A SLICE has two MUXF7s and one MUXF8, and
+        // which LUTs and which bypass pin each one uses is not a guess: it is
+        // what nextpnr's own packer builds (himbaechel/uarch/xilinx, pack.cc
+        // constrain_muxf_tree and xilinx_place.cc).  There, I1's driver stays
+        // in the same eight and I0's sits one spacing up, and the select is
+        // the X input of the eight the mux is charged to:
+        //
+        //   F7A = AX ? A.O6 : B.O6     reaches column A
+        //   F7B = CX ? C.O6 : D.O6     reaches column C
+        //   F8  = BX ? F7A  : F7B      reaches column B
+        //
+        // Built here rather than inside `xcol` because it spans columns, and
+        // emitted as MUXF7/MUXF8 cells so that both sides of a comparison
+        // describe it with the same primitive.  Only built where a column
+        // actually selects it -- there is no feature saying a mux exists, only
+        // features saying a column reads one.
+        std::map<char, std::string> fx_of;
+        {
+            auto selects_wide = [&](char c) {
+                auto it = sc.columns.find(c);
+                if (it == sc.columns.end()) return false;
+                const ColumnConfig &cc = it->second;
+                return cc.outmux == OutMux::F7 || cc.outmux == OutMux::F8 ||
+                       (cc.ff_used && cc.ff_src == FFSrc::Wide);
+            };
+            bool need_a = selects_wide('A'), need_c = selects_wide('C'),
+                 need_b = selects_wide('B');
+            // An F8 is a mux of the two F7s, so wanting it wants them both.
+            if (need_b) need_a = need_c = true;
+            auto mk = [&](const std::string &name, const std::string &type,
+                          const std::string &i0, const std::string &i1, const std::string &sel) {
+                std::string w = prefix + "_" + name;
+                helper_wires.push_back(w);
+                body << "  " << type << " \\" << w << "_m (.I0(" << i0 << "), .I1(" << i1
+                     << "), .S(" << sel << "), .O(" << w << "));\n";
+                return w;
+            };
+            std::string f7a, f7b;
+            if (need_a) f7a = mk("F7A", "MUXF7", net("B"), net("A"), net("AX"));
+            if (need_c) f7b = mk("F7B", "MUXF7", net("D"), net("C"), net("CX"));
+            if (need_a) fx_of['A'] = f7a;
+            if (need_c) fx_of['C'] = f7b;
+            if (need_b) fx_of['B'] = mk("F8", "MUXF8", f7b, f7a, net("BX"));
         }
 
         for (const auto &cc : sc.columns) {
@@ -964,7 +1022,8 @@ endmodule
                // whatever PRECYINIT selected at the bottom of the slice.  A
                // column outside a chain still has the pin, tied low, because
                // the model's XOR and CY paths read it unconditionally.
-               << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "),\n"
+               << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "), "
+               << ".FX(" << (fx_of.count(c) ? fx_of[c] : std::string("1'b0")) << "),\n"
                << "     .WA(" << wa << "), .DI(" << di << "), .DI2(" << di2 << "), .WE(" << we << "),\n"
                << "     .O6(" << net(C) << "), .O5(), .Q(" << net(C + "Q")
                << "), .MUX(" << net(C + "MUX") << "), .CO("
@@ -990,7 +1049,6 @@ endmodule
     // real gap and it is deliberate: `fasm2netlist` reads the contents out of
     // the bitstream, and tests/rtl/build_and_check.py compares them.
     int brams = 0;
-    std::vector<std::string> bram_wires;   // the outputs of the pin inverters
     for (const auto &b : bram_sites) {
         if (b.canon.empty()) continue;
         // prjxray stores an inversion complemented, so the pins to invert are
@@ -1014,16 +1072,22 @@ endmodule
         // One port of the primitive.  `base` is the site pin its bit 0 sits
         // on; `baseU` the upper 18Kb half's copy, which exists only on the
         // 36Kb site and which in 36Kb mode carries the same signal.
-        auto wire_up = [&](const char *port, int width, bool out, const std::string &base,
-                           const char *baseU) {
+        auto wire_up = [&](const char *port, int width, bool out, const bram::Port36 *p36,
+                           const std::string &base) {
             int n = width ? width : 1;
             std::vector<std::string> bits;   // MSB first, as a concatenation is written
             bool any = false;
             for (int i = n - 1; i >= 0; i--) {
                 std::string suffix = width ? std::to_string(i) : std::string();
                 std::string bit;
-                std::vector<std::string> sps{base + suffix};
-                if (baseU) sps.push_back(baseU + suffix);
+                std::vector<std::string> sps;
+                if (p36) {
+                    auto [l, u] = bram::pins36(*p36, i);
+                    sps.push_back(l);
+                    if (!u.empty()) sps.push_back(u);
+                } else {
+                    sps.push_back(base + suffix);
+                }
                 for (const auto &sp : sps) {
                     auto it = b.canon.find(sp);
                     if (it == b.canon.end()) continue;
@@ -1047,7 +1111,7 @@ endmodule
             // is a scalar, so there is no bus case to get wrong.
             if (!width && inverted.count(port)) {
                 std::string w = iname + "_" + port + "_inv";
-                bram_wires.push_back(w);
+                helper_wires.push_back(w);
                 body << "  INV \\" << w << "_i (.I(" << bits[0] << "), .O(" << w << "));\n";
                 bits[0] = w;
             }
@@ -1064,15 +1128,39 @@ endmodule
         };
 
         if (b.is36)
-            for (const auto &p : bram::kRamb36) wire_up(p.port, p.width, p.out, p.pin, p.pinU);
+            for (const auto &p : bram::kRamb36) wire_up(p.port, p.width, p.out, &p, p.pin);
         else
-            for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, p.name, nullptr);
+            for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, nullptr, p.name);
         if (first) continue;   // the routing touches none of it
         body << "  " << (b.is36 ? "RAMB36E1" : "RAMB18E1") << " \\" << iname << " (" << o.str()
              << ");\n";
         brams++;
     }
     if (brams) std::cerr << "  block RAMs cut at their boundary: " << brams << "\n";
+
+    // ---- the clock manager's LOCKED pin --------------------------------
+    // The MMCM itself is not modelled and cannot usefully be: what comes out
+    // of it is a frequency, and this program only reasons about Boolean
+    // values.  But one of its pins IS Boolean -- LOCKED, which the reset
+    // circuit of practically every LiteX SoC reads -- and leaving it on the
+    // interconnect pull-up makes it a CONSTANT, so a reset synchroniser that
+    // waits for the PLL compares against 1 and differs for a reason that has
+    // nothing to do with the design.  Emitting the block with just that pin
+    // makes it a cut point instead: a free variable the placement can pair
+    // with the synthesis's own, which is what it honestly is.
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        if (ti == tiles.end() || ti->second.type.rfind("CMT_TOP", 0) != 0) continue;
+        for (const auto &pins : site_pins[ti->second.type]) {
+            auto lk = pins.find("LOCKED");
+            if (lk == pins.end()) continue;
+            std::string raw = tw(kv.first, lk->second);
+            driven_raw.insert(raw);
+            body << "  MMCME2_ADV \\" << sanitise(kv.first + "_MMCME2_ADV") << " (.LOCKED("
+                 << emit_net(raw) << "));\n";
+            break;
+        }
+    }
 
     // now the module, in order: ports, internal nets, routing, instances.
     // Taken here, not earlier: resolving a slice's pins adds endpoints.
@@ -1220,7 +1308,7 @@ endmodule
     for (const auto &a : assigns)
         os << "  assign " << emit_net(a.first) << " = " << emit_net(a.second) << ";\n";
     for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
-    for (const auto &w : bram_wires) os << "  wire " << w << ";\n";
+    for (const auto &w : helper_wires) os << "  wire " << w << ";\n";
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
     os << "\n" << body.str() << "endmodule\n";
 

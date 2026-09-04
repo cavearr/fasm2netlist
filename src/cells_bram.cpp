@@ -235,9 +235,10 @@ void emitRamb36(FasmDesign& fd, Netlist& nl, const std::string& tile, const std:
 		int n = p.width == 0 ? 1 : p.width;
 		for (int i = n - 1; i >= 0; i--) {
 			std::string suffix = p.width == 0 ? "" : std::to_string(i);
-			std::string net = netAt(p.pin + suffix);
-			if (p.pinU) {
-				std::string u = netAt(p.pinU + suffix);
+			auto [pinL, pinU] = bram::pins36(p, i);
+			std::string net = netAt(pinL);
+			if (!pinU.empty()) {
+				std::string u = netAt(pinU);
 				// In 36Kb mode both halves see the same signal; if the
 				// routing says otherwise this tile is not really one RAMB36.
 				if (!u.empty() && !net.empty() && u != net && crossCheck(p.port))

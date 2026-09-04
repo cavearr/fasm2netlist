@@ -19,6 +19,35 @@ const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "BUFG", "IBUFDS", "OB
 // hold a boolean value, so an inout is not compared as an output.
 const std::map<std::string, std::string> BIDIR_RECEIVE = {{"IOBUF", "IO"}, {"IOBUFDS", "IO"}};
 
+// The wide multiplexers that join two LUT outputs into one wider function.
+// The fabric side reaches them through a column's output mux, which the tile
+// model already covers; the synthesis side instantiates them as cells, and
+// leaving them out does not make one cone wrong -- it makes the net a MUXF
+// drives look UNDRIVEN, so it becomes a free variable and every cone reading
+// it differs from a counterpart that computed the value properly.
+const std::set<std::string> WIDE_MUX = {"MUXF7", "MUXF8", "MUXF9"};
+
+// Hard blocks with an output no Boolean model can produce, and the pins to cut
+// at.  A PLL's LOCKED is the case in hand: it does not say anything about the
+// design's signals, it says whether an analogue loop has settled, so neither
+// netlist can compute it and the only sound thing is to give both sides the
+// SAME free variable -- paired by the placement, exactly as a memory read is.
+//
+// What this does not check is the MMCM's configuration.  Nothing here could:
+// the divisors decide what frequency comes out, and a frequency is not a
+// Boolean fact.  The clock tree those outputs feed is assumed rather than
+// reconstructed for the same reason (see the note on clock pins below), and
+// this is the same assumption reaching one signal further.
+const std::map<std::string, std::set<std::string>> OPAQUE_OUT = {
+    {"MMCME2_ADV", {"LOCKED"}},
+    {"PLLE2_ADV", {"LOCKED"}},
+};
+bool is_opaque_out(const std::string &type, const std::string &pin)
+{
+    auto it = OPAQUE_OUT.find(type);
+    return it != OPAQUE_OUT.end() && it->second.count(pin) != 0;
+}
+
 // The synthesis-side distributed RAMs, and how wide one port's data is.  Each
 // port is 64 stored bits either way -- 64 entries of one bit, or 32 of two --
 // which is exactly one SLICEM column, and is why the two sides can be matched
@@ -268,25 +297,42 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (inst.type.rfind("LUT", 0) == 0 && inst.type != "LUT6_2" && pin.name == "O") ||
                           (PASSTHROUGH.count(inst.type) && (pin.name == "O" || pin.name == "OB")) ||
                           (inst.type == "INV" && pin.name == "O") ||
+                          (WIDE_MUX.count(inst.type) && pin.name == "O") ||
+                          is_opaque_out(inst.type, pin.name) ||
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
                           (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
                           (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
                           (is_bram(inst.type) && bram_data_out(pin.name));
             if (!is_out)
                 continue;
-            // A block RAM's data output is a bus, so each of its bits has to
-            // claim its own net -- a whole-pin driver would leave 15 of 16
-            // bits looking undriven and every one of them a fresh free
-            // variable that the other side has no counterpart for.
-            if (is_bram(inst.type)) {
+            // A memory's data output is a BUS, and every bit of it has to
+            // claim its own net.  Registering one driver for the whole pin
+            // leaves all but the first bit looking undriven -- a fresh free
+            // variable with no counterpart on the other side -- and the pin's
+            // connection is usually a concatenation, which has no single net
+            // name at all, so nothing gets registered and every bit goes
+            // free.  A sixteen-bit block RAM port and a two-bit RAM32M port
+            // failed in exactly that same way; a one-bit RAM64M port did not,
+            // which is what made it look like a block RAM problem.
+            int mem_width = 0;
+            if (is_opaque_out(inst.type, pin.name)) {
+                mem_width = 1;
+            } else if (is_bram(inst.type)) {
                 for (const auto &p2 : bram_ports(inst.type, true))
-                    if (p2.first == pin.name)
-                        for (int b = 0; b < std::max(p2.second, 1); b++) {
-                            std::string bn = net_of_bit(pin.conn, b);
-                            if (bn.empty()) continue;
-                            driver_[bn] = Driver{&inst, pin.name};
-                            bram_out_[bn] = mem_cut_name(inst.name, pin.name, b);
-                        }
+                    if (p2.first == pin.name) mem_width = std::max(p2.second, 1);
+            } else if (!memory_as_state_ && RAM_PORTS.count(inst.type) &&
+                       pin.name.rfind("DO", 0) == 0) {
+                // Not under the state model: that one wants the whole pin, to
+                // anchor 64 stored bits on the net the port reads onto.
+                mem_width = RAM_PORTS.at(inst.type);
+            }
+            if (mem_width) {
+                for (int b = 0; b < mem_width; b++) {
+                    std::string bn = net_of_bit(pin.conn, b);
+                    if (bn.empty()) continue;
+                    driver_[bn] = Driver{&inst, pin.name};
+                    mem_out_[bn] = mem_cut_name(inst.name, pin.name, b);
+                }
                 continue;
             }
             std::string n;
@@ -531,6 +577,14 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
     if (inst.type == "INV")
         return negate(in("I"));
 
+    // O = S ? I1 : I0.  Nothing subtler: the select is a real input like any
+    // other, and both halves are evaluated because a miter needs the function,
+    // not a simulation.
+    if (WIDE_MUX.count(inst.type)) {
+        Lit s = in("S"), i0 = in("I0"), i1 = in("I1");
+        return net_.mk_or(net_.mk_and(s, i1), net_.mk_and(negate(s), i0));
+    }
+
     {
         auto bd = BIDIR_RECEIVE.find(inst.type);
         if (bd != BIDIR_RECEIVE.end() && pin == "O")
@@ -660,6 +714,10 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             if (sel == "O5") return eval_cell_output(inst, "O5", depth);
             if (sel == "XOR") return eval_cell_output(inst, "XOR", depth);
             if (sel == "CY") return eval_cell_output(inst, "CO", depth);
+            if (sel == "F7" || sel == "F8") {
+                const Pin *fx = inst.find_pin("FX");
+                return fx ? eval_expr(fx->conn, depth) : LIT_FALSE;
+            }
             return LIT_FALSE;
         }
         return LIT_FALSE;
@@ -716,11 +774,11 @@ Lit Cones::eval_net(const std::string &raw, int depth)
     } else if (inputs_.count(n)) {
         result = sym(n);
     } else {
-        auto bo = bram_out_.find(n);
-        if (bo != bram_out_.end()) {
-            // A block RAM read is a cut point: whatever came out of the array
-            // is a free variable, and the paired memory's read is renamed to
-            // the same one so the two cancel wherever they are used.
+        auto bo = mem_out_.find(n);
+        if (bo != mem_out_.end()) {
+            // A memory read is a cut point: whatever came out of the array is
+            // a free variable, and the paired memory's read is renamed to the
+            // same one so the two cancel wherever they are used.
             auto c2 = mem_cut_.find(bo->second);
             result = net_.input(c2 == mem_cut_.end() ? bo->second : c2->second);
             memo_[n] = result;
@@ -871,6 +929,11 @@ Lit Cones::next_state(const std::string &state_name)
         else if (src == "X") d = pin_lit("X", LIT_FALSE);
         else if (src == "XOR") d = eval_cell_output(ff, "XOR", 0);
         else if (src == "CY") d = eval_cell_output(ff, "CO", 0);
+        // The slice's wide multiplexer, built between columns by the tile
+        // model and arriving on this pin.  Tying it to nought instead, which
+        // is what this did before, is not a missing cone: it is a register
+        // whose next state is a constant, and every cone reading it differs.
+        else if (src == "F7F8") d = pin_lit("FX", LIT_FALSE);
         Lit ce = pin_lit("CE", LIT_TRUE);
         Lit sr = pin_lit("SR", LIT_FALSE);
         Lit q = sym_state(state_name);

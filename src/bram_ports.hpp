@@ -11,6 +11,9 @@
 #ifndef F2N_BRAM_PORTS_HPP
 #define F2N_BRAM_PORTS_HPP
 
+#include <string>
+#include <utility>
+
 namespace bram {
 
 struct Port {
@@ -42,42 +45,48 @@ struct Port36 {
 	const char* pinU; // the U variant to cross-check, or nullptr
 	int width;
 	bool out;
+	// A 36Kb DATA port is not one signal reaching both halves, it is one
+	// signal SPLIT between them: even bits leave on the lower half's pins and
+	// odd bits on the upper half's, so bit i sits on <pin>L<i/2> or
+	// <pin>U<i/2>.  Control and address are the other case -- both halves see
+	// the same value, which is why they carry a cross-check instead.
+	bool interleaved;
 };
 inline constexpr Port36 kRamb36[] = {
-    {"ADDRARDADDR", "ADDRARDADDRL", "ADDRARDADDRU", 16, false},
-    {"ADDRBWRADDR", "ADDRBWRADDRL", "ADDRBWRADDRU", 16, false},
-    {"CASCADEINA", "CASCADEINA", nullptr, 0, false},
-    {"CASCADEINB", "CASCADEINB", nullptr, 0, false},
-    {"CASCADEOUTA", "CASCADEOUTA", nullptr, 0, true},
-    {"CASCADEOUTB", "CASCADEOUTB", nullptr, 0, true},
-    {"CLKARDCLK", "CLKARDCLKL", "CLKARDCLKU", 0, false},
-    {"CLKBWRCLK", "CLKBWRCLKL", "CLKBWRCLKU", 0, false},
-    {"DBITERR", "DBITERR", nullptr, 0, true},
-    {"DIADI", "DIADI", nullptr, 32, false},
-    {"DIBDI", "DIBDI", nullptr, 32, false},
-    {"DIPADIP", "DIPADIP", nullptr, 4, false},
-    {"DIPBDIP", "DIPBDIP", nullptr, 4, false},
-    {"DOADO", "DOADO", nullptr, 32, true},
-    {"DOBDO", "DOBDO", nullptr, 32, true},
-    {"DOPADOP", "DOPADOP", nullptr, 4, true},
-    {"DOPBDOP", "DOPBDOP", nullptr, 4, true},
-    {"ECCPARITY", "ECCPARITY", nullptr, 8, true},
-    {"ENARDEN", "ENARDENL", "ENARDENU", 0, false},
-    {"ENBWREN", "ENBWRENL", "ENBWRENU", 0, false},
-    {"INJECTDBITERR", "INJECTDBITERR", nullptr, 0, false},
-    {"INJECTSBITERR", "INJECTSBITERR", nullptr, 0, false},
-    {"REGCEAREGCE", "REGCEAREGCEL", "REGCEAREGCEU", 0, false},
-    {"REGCEB", "REGCEBL", "REGCEBU", 0, false},
-    {"REGCLKARDRCLK", "REGCLKARDRCLKL", "REGCLKARDRCLKU", 0, false},
-    {"REGCLKB", "REGCLKBL", "REGCLKBU", 0, false},
+    {"ADDRARDADDR", "ADDRARDADDRL", "ADDRARDADDRU", 16, false, false},
+    {"ADDRBWRADDR", "ADDRBWRADDRL", "ADDRBWRADDRU", 16, false, false},
+    {"CASCADEINA", "CASCADEINA", nullptr, 0, false, false},
+    {"CASCADEINB", "CASCADEINB", nullptr, 0, false, false},
+    {"CASCADEOUTA", "CASCADEOUTA", nullptr, 0, true, false},
+    {"CASCADEOUTB", "CASCADEOUTB", nullptr, 0, true, false},
+    {"CLKARDCLK", "CLKARDCLKL", "CLKARDCLKU", 0, false, false},
+    {"CLKBWRCLK", "CLKBWRCLKL", "CLKBWRCLKU", 0, false, false},
+    {"DBITERR", "DBITERR", nullptr, 0, true, false},
+    {"DIADI", "DIADI", nullptr, 32, false, true},
+    {"DIBDI", "DIBDI", nullptr, 32, false, true},
+    {"DIPADIP", "DIPADIP", nullptr, 4, false, true},
+    {"DIPBDIP", "DIPBDIP", nullptr, 4, false, true},
+    {"DOADO", "DOADO", nullptr, 32, true, true},
+    {"DOBDO", "DOBDO", nullptr, 32, true, true},
+    {"DOPADOP", "DOPADOP", nullptr, 4, true, true},
+    {"DOPBDOP", "DOPBDOP", nullptr, 4, true, true},
+    {"ECCPARITY", "ECCPARITY", nullptr, 8, true, false},
+    {"ENARDEN", "ENARDENL", "ENARDENU", 0, false, false},
+    {"ENBWREN", "ENBWRENL", "ENBWRENU", 0, false, false},
+    {"INJECTDBITERR", "INJECTDBITERR", nullptr, 0, false, false},
+    {"INJECTSBITERR", "INJECTSBITERR", nullptr, 0, false, false},
+    {"REGCEAREGCE", "REGCEAREGCEL", "REGCEAREGCEU", 0, false, false},
+    {"REGCEB", "REGCEBL", "REGCEBU", 0, false, false},
+    {"REGCLKARDRCLK", "REGCLKARDRCLKL", "REGCLKARDRCLKU", 0, false, false},
+    {"REGCLKB", "REGCLKBL", "REGCLKBU", 0, false, false},
     // prjxray spells the lower RSTRAMARSTRAM pin with a trailing "RST"
-    {"RSTRAMARSTRAM", "RSTRAMARSTRAMLRST", "RSTRAMARSTRAMU", 0, false},
-    {"RSTRAMB", "RSTRAMBL", "RSTRAMBU", 0, false},
-    {"RSTREGARSTREG", "RSTREGARSTREGL", "RSTREGARSTREGU", 0, false},
-    {"RSTREGB", "RSTREGBL", "RSTREGBU", 0, false},
-    {"SBITERR", "SBITERR", nullptr, 0, true},
-    {"WEA", "WEAL", "WEAU", 4, false},
-    {"WEBWE", "WEBWEL", "WEBWEU", 8, false},
+    {"RSTRAMARSTRAM", "RSTRAMARSTRAMLRST", "RSTRAMARSTRAMU", 0, false, false},
+    {"RSTRAMB", "RSTRAMBL", "RSTRAMBU", 0, false, false},
+    {"RSTREGARSTREG", "RSTREGARSTREGL", "RSTREGARSTREGU", 0, false, false},
+    {"RSTREGB", "RSTREGBL", "RSTREGBU", 0, false, false},
+    {"SBITERR", "SBITERR", nullptr, 0, true, false},
+    {"WEA", "WEAL", "WEAU", 4, false, false},
+    {"WEBWE", "WEBWEL", "WEBWEU", 8, false, false},
 };
 
 // The control inputs that have an inversion bit of their own.  prjxray stores
@@ -91,6 +100,21 @@ inline constexpr const char* kInvertible[] = {
     "CLKARDCLK", "CLKBWRCLK", "ENARDEN",       "ENBWREN", "REGCLKARDRCLK",
     "REGCLKB",   "RSTRAMB",   "RSTRAMARSTRAM", "RSTREGB", "RSTREGARSTREG",
 };
+
+// The site pin(s) carrying bit `i` of a 36Kb port: the one it lives on, and
+// where the two 18Kb halves are driven together, the second copy to check it
+// against.  Getting this wrong does not produce a wrong connection, it
+// produces NO connection -- the site has no pin of that name -- so a data port
+// asked for by the plain name simply vanishes from the netlist, which is
+// exactly what happened to every RAMB36's data until the equivalence check on
+// the LiteX SoC noticed the fabric reading a ROM's address where the synthesis
+// read its data.
+inline std::pair<std::string, std::string> pins36(const Port36& p, int i) {
+	if (p.interleaved)
+		return {std::string(p.pin) + (i % 2 ? "U" : "L") + std::to_string(i / 2), std::string()};
+	std::string suffix = p.width == 0 ? std::string() : std::to_string(i);
+	return {p.pin + suffix, p.pinU ? p.pinU + suffix : std::string()};
+}
 
 } // namespace bram
 

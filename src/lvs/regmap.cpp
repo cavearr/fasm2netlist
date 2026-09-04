@@ -256,6 +256,16 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         }
     }
 
+    // The clock manager.  Only its LOCKED pin is paired, and only because it
+    // is the one Boolean thing about an MMCM; see the note in src/lvs/cone.cpp
+    // for what that does and does not establish.
+    for (const auto &pv : place.members()) {
+        std::string bel = pv.second.get("bel").asString();
+        if (bel != "MMCME2_ADV" && bel != "PLLE2_ADV") continue;
+        std::string gate = sanitise(pv.second.get("tile").asString() + "_MMCME2_ADV");
+        out.mem[gate + ":LOCKED[0]"] = pv.first + ":LOCKED[0]";
+    }
+
     for (const auto &pv : place.members()) {
         if (pv.second.get("type").asString() != "SLICE_FFX")
             continue;
