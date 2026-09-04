@@ -55,19 +55,32 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
     // invention ($abc$...) and tell the reader nothing, so they are skipped;
     // the first real name to claim a bit wins.
     std::map<int64_t, std::string> label;
+    std::map<int64_t, std::vector<std::string>> alt_label;
     for (const auto &nn : mod->get("netnames").members()) {
         const json::Value &hide = nn.second.get("hide_name");
-        if (!hide.isNull() && hide.asInt() != 0)
-            continue;
+        bool hidden = !hide.isNull() && hide.asInt() != 0;
         const auto &bits = nn.second.get("bits").items();
         for (size_t i = 0; i < bits.size(); i++) {
             if (bits[i].type != json::Type::Int)
                 continue;
             int64_t b = bits[i].asInt();
-            if (!label.count(b))
-                label[b] = bits.size() == 1 ? nn.first : nn.first + "[" + std::to_string(i) + "]";
+            std::string nm = bits.size() == 1 ? nn.first : nn.first + "[" + std::to_string(i) + "]";
+            // Every name, hidden or not, is a CANDIDATE: the caller has to
+            // find whichever one its own netlist emitted, and write_verilog
+            // does not always choose the same one as this does.  Only the
+            // preferred label skips hidden names, and only because a report
+            // reads better with "wdata0_r[0]" in it than "_0565_".
+            alt_label[b].push_back(nm);
+            if (!hidden && !label.count(b))
+                label[b] = nm;
         }
     }
+    // A bit no real name claimed still needs one, or its register goes
+    // unmatched -- and an unmatched register is not one missing cone, it makes
+    // every cone downstream of it incomparable too.
+    for (const auto &[b, names] : alt_label)
+        if (!label.count(b) && !names.empty())
+            label[b] = names.front();
 
     // site pins, per tile type, in the order the tile lists its sites
     std::map<std::string, std::vector<std::map<std::string, std::string>>> tt_pins;
@@ -191,6 +204,10 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             continue;
         }
         out.net[tile + "/" + wire->second] = lb->second;
+        {
+            auto a = alt_label.find(q[0].asInt());
+            if (a != alt_label.end()) out.alt[tile + "/" + wire->second] = a->second;
+        }
         out.mapped++;
     }
     return out;

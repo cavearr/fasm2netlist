@@ -103,6 +103,7 @@ static int run(int argc, char **argv)
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
     std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
+    std::map<std::string, std::vector<std::string>> gate_alts;  // other names for the same net
 
     // Build the register correspondence here rather than in a helper script:
     // it is a filter on this program's own input, and it needs nothing but the
@@ -115,6 +116,7 @@ static int run(int argc, char **argv)
             return r;
         };
         for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
+        for (const auto &kv : rm.alt) gate_alts[sanitise(kv.first)] = kv.second;
         mem_cuts = rm.mem;
         if (!mem_cuts.empty())
             std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
@@ -147,9 +149,23 @@ static int run(int argc, char **argv)
     {
         std::map<std::string, std::string> resolved;
         for (const auto &[gate_net, label] : gate_to_gold) {
+            // Try the preferred name, then every other name the same net
+            // answers to.  A register left unmatched is not one lost cone: it
+            // is a different free variable on each side, so everything reading
+            // it differs too -- which is how six registers here made a hundred
+            // look wrong.
+            std::vector<std::string> cands{label};
+            auto a = gate_alts.find(gate_net);
+            if (a != gate_alts.end())
+                for (const auto &n : a->second)
+                    if (n != label) cands.push_back(n);
             std::string target = label;
-            for (const auto &g : gold.states())
-                if (g == label || gold.synonyms(g).count(label)) { target = g; break; }
+            bool found = false;
+            for (const auto &c : cands) {
+                for (const auto &g : gold.states())
+                    if (g == c || gold.synonyms(g).count(c)) { target = g; found = true; break; }
+                if (found) break;
+            }
             resolved[gate_net] = target;
         }
         gate_to_gold.swap(resolved);
@@ -180,8 +196,37 @@ static int run(int argc, char **argv)
 
     std::cout << "registers: " << gold.states().size() << " gold, " << gate.states().size()
               << " gate, " << common.size() << " matched by name\n";
-    if (common.size() != gold.states().size() || common.size() != gate.states().size())
-        std::cout << "  (unmatched registers are skipped -- their cones are not comparable)\n";
+    if (common.size() != gold.states().size() || common.size() != gate.states().size()) {
+        // Name them.  A count says something is wrong; the names say what, and
+        // an unmatched register poisons every cone downstream of it -- its two
+        // sides become different free variables, so anything reading it
+        // differs for a reason that has nothing to do with the logic.
+        std::set<std::string> gm, tm;
+        for (const auto &c : common) { gm.insert(c.first); tm.insert(c.second); }
+        auto name_them = [](const char *side, const std::set<std::string> &all,
+                            const std::set<std::string> &matched) {
+            std::vector<std::string> missing;
+            for (const auto &s : all)
+                if (!matched.count(s)) missing.push_back(s);
+            if (missing.empty()) return;
+            std::cout << "  " << missing.size() << " unmatched on the " << side << " side:";
+            for (size_t i = 0; i < missing.size() && i < 8; i++) std::cout << " " << missing[i];
+            if (missing.size() > 8) std::cout << " ...";
+            std::cout << "\n";
+        };
+        name_them("gold", gold.states(), gm);
+        name_them("gate", gate.states(), tm);
+        // ...and what the placement thought each unmatched one was called.
+        // A count plus two lists says they did not meet; this says where.
+        for (const auto &t : gate.states()) {
+            if (tm.count(t)) continue;
+            auto m = gate_to_gold.find(t);
+            std::cout << "    " << t << " -> "
+                      << (m == gate_to_gold.end() ? std::string("(no placement label)") : m->second)
+                      << "\n";
+        }
+        std::cout << "  (their cones are not comparable, and neither is anything reading them)\n";
+    }
     // One session for the whole run: both designs' cones live in `net`, and a
     // solver told that once can keep what it learns from one register to the
     // next instead of meeting the same network again per question.
@@ -196,7 +241,7 @@ static int run(int argc, char **argv)
         if (!dump_prefix.empty()) {
             // the same question in a form another solver can be handed
             std::string safe = label;
-            for (char &c : safe) if (!isalnum(c)) c = '_';
+            for (char &c : safe) if (!isalnum((unsigned char)c)) c = '_';
             std::ofstream(dump_prefix + safe + (solver.format == Format::Dimacs ? ".cnf" : ".smt2"))
                 << emit(net, miter, solver.format);
         }

@@ -12,12 +12,18 @@
 #pragma once
 #include <map>
 #include <string>
+#include <vector>
 
 namespace lvs {
 
 struct RegMap {
     // raw "TILE/WIRE" endpoint -> the source signal name, e.g. "led_int[2]"
     std::map<std::string, std::string> net;
+    // ...and every other name that same net answers to.  One net often has
+    // several: the reader wants the nicest, but the two sides need only agree,
+    // and write_verilog does not necessarily emit the one picked here.  Naming
+    // them all lets the caller choose the one its netlist actually uses.
+    std::map<std::string, std::vector<std::string>> alt;
     // Memory pairing: the read symbol a fabric column produces -> the one its
     // synthesis counterpart produces.  A memory's contents are cut rather than
     // modelled, so this is all a comparison needs from it: give both sides the

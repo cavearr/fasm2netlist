@@ -283,7 +283,13 @@ int main(int argc, char** argv) {
 	// when both --xdc and --part were given; otherwise the module has no
 	// ports, as before. ----
 	std::vector<std::string> portDecls;
-	std::string clkPortName, plainIbufOutNet;
+	std::string clkPortName;
+	// Every plain (single-ended) input's buffered output.  The SR tie-off
+	// below wants THE reset, and with one candidate that is what this is;
+	// with several there is nothing in the bitstream that says which, so it
+	// says so rather than picking whichever the map happened to visit last
+	// and quietly tying every register's reset to it.
+	std::vector<std::string> plainIbufOutNets;
 	if (!xdcPath.empty()) {
 		auto sitePin = [&](const std::string& tile, const std::string& ttype, int ordinal,
 		                    const std::string& pin) -> std::string {
@@ -393,7 +399,7 @@ int main(int argc, char** argv) {
 				std::string oNet = pit != pins.end() ? fd.netOf(r.tile, pit->second) : "";
 				nl.markDriven(oNet);
 				lines.push_back("  IBUF \\" + inst + " (.I(" + pname + "), .O(" + oNet + "));");
-				plainIbufOutNet = oNet;
+				plainIbufOutNets.push_back(oNet);
 			} else if (kind == "obuf") {
 				auto pins = fd.sitePinsByType(ttype, styp);
 				auto pit = pins.find("O");
@@ -433,9 +439,17 @@ int main(int argc, char** argv) {
 		// the IBUFDS/BUFG/mesh reconstruction entirely.
 		if (!clkPortName.empty())
 			for (auto& n : nl.clkNetsUsed) nl.assign(n, clkPortName);
-		if (!plainIbufOutNet.empty())
+		if (plainIbufOutNets.size() > 1 && !nl.srNetsUsed.empty()) {
+			std::string names;
+			for (auto& n : plainIbufOutNets) names += (names.empty() ? "" : ", ") + n;
+			warnings.push_back("several single-ended input ports (" + names +
+			                    "); which one drives the slices' set/reset is not in the "
+			                    "bitstream, so no SR tie-off was made");
+		} else if (plainIbufOutNets.size() == 1) {
+			const std::string& rst = plainIbufOutNets.front();
 			for (auto& n : nl.srNetsUsed)
-				if (n != plainIbufOutNet) nl.assign(n, plainIbufOutNet);
+				if (n != rst) nl.assign(n, rst);
+		}
 	}
 
 	// ---- tie off genuinely-unrouted nets (no clock-tree reconstruction in
