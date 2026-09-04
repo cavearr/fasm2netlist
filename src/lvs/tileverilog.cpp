@@ -188,6 +188,12 @@ int main(int argc, char **argv)
 
     // site pins per tile type, from tile_type_*.json
     std::map<std::string, std::vector<std::map<std::string, std::string>>> site_pins; // type -> per-site pin->wire
+    // ...and what FASM calls each of those sites, in the same order.  A tile
+    // type describes its sites positionally and by coordinate ("prefix"
+    // RAMB18, "y_coord" 0); FASM names them "RAMB18_Y0".  Knowing the FASM
+    // spelling is what lets a site's configuration be told apart from a PIP,
+    // since the two are written identically -- "<tile>.<a>.<b>" either way.
+    std::map<std::string, std::vector<std::string>> site_names;   // type -> per-site FASM name
     auto load_type = [&](const std::string &type) {
         if (site_pins.count(type)) return;
         std::string path = db + "/tile_type_" + type + ".json";
@@ -195,13 +201,19 @@ int main(int argc, char **argv)
         if (!probe) { site_pins[type] = {}; return; }
         json::Value tt = json::parse(readFile(path));
         std::vector<std::map<std::string, std::string>> per;
+        std::vector<std::string> names;
         for (const auto &s : tt.get("sites").items()) {
             std::map<std::string, std::string> m;
             for (const auto &pk : s.get("site_pins").members())
                 m[pk.first] = pk.second.get("wire").asString();
             per.push_back(m);
+            const json::Value &pre = s.get("prefix"), &yc = s.get("y_coord");
+            names.push_back(pre.isNull() || yc.isNull()
+                                ? std::string()
+                                : pre.asString() + "_Y" + std::to_string(yc.asInt()));
         }
         site_pins[type] = per;
+        site_names[type] = names;
     };
     for (const auto &t : used) if (tiles.count(t)) load_type(tiles[t].type);
 
@@ -425,11 +437,32 @@ int main(int argc, char **argv)
 
     // ---- routing features: one assign each -------------------------------
     std::vector<std::pair<std::string, std::string>> assigns; // dst, src
+    // A non-slice site's configuration, kept against the site that set it.
+    // These are the features the model reads to know what a hard block is
+    // configured as; the ones it has no use for are still counted, so the
+    // report says how much of the bitstream went unread.
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> site_feats; // tile -> site -> features
     int skipped_site_cfg = 0;
     for (const auto &kv : dc.other_tiles) {
         const std::string &tile = kv.first;
+        auto ti = tiles.find(tile);
+        const std::vector<std::string> *sn =
+            ti == tiles.end() ? nullptr : &site_names[ti->second.type];
         for (const auto &feat : kv.second) {
             auto dot = feat.find('.');
+            // "<site>.<feature>" and "<dstwire>.<srcwire>" are the same shape,
+            // so the only thing that tells them apart is whether the first
+            // component names a site of this tile.  Reading a site's
+            // configuration as a PIP is not harmless: it invents a net called
+            // RAMB18_Y0 driven by one called IN_USE, and every such pair is a
+            // wire the design does not have.
+            if (dot != std::string::npos && sn) {
+                std::string head = feat.substr(0, dot);
+                if (std::find(sn->begin(), sn->end(), head) != sn->end()) {
+                    site_feats[tile][head].push_back(feat.substr(dot + 1));
+                    continue;
+                }
+            }
             if (dot == std::string::npos || feat.find('.', dot + 1) != std::string::npos) {
                 skipped_site_cfg++;   // site config for a non-slice site, not a PIP
                 continue;
