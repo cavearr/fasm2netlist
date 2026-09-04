@@ -150,6 +150,12 @@ static int run(int argc, char **argv)
     // with different free variables for the same register and every cone
     // "differs".
     {
+        // Every name a gold state answers to, mapped to that state.  Built in
+        // states() order and keeping the first claimant, which is the answer
+        // the scan this replaces would have reached.
+        std::map<std::string, std::string> gold_by_name;
+        for (const auto &g : gold.states())
+            for (const auto &n : gold.synonyms(g)) gold_by_name.emplace(n, g);
         std::map<std::string, std::string> resolved;
         for (const auto &[gate_net, label] : gate_to_gold) {
             // Try the preferred name, then every other name the same net
@@ -163,11 +169,9 @@ static int run(int argc, char **argv)
                 for (const auto &n : a->second)
                     if (n != label) cands.push_back(n);
             std::string target = label;
-            bool found = false;
             for (const auto &c : cands) {
-                for (const auto &g : gold.states())
-                    if (g == c || gold.synonyms(g).count(c)) { target = g; found = true; break; }
-                if (found) break;
+                auto hit = gold_by_name.find(c);
+                if (hit != gold_by_name.end()) { target = hit->second; break; }
             }
             resolved[gate_net] = target;
         }
@@ -179,20 +183,31 @@ static int run(int argc, char **argv)
     // Match by any shared name, not just an identical one.  With --map the
     // gate's states already carry the gold's names, so this is an equality.
     std::vector<std::pair<std::string, std::string>> common;   // (gold, gate)
-    for (const auto &g : gold.states()) {
-        auto gsyn = gold.synonyms(g);
+    {
+        // Index the gate side by every name it could be matched on: the label
+        // the placement gave it if it has one, else each of its own synonyms.
+        // states() is a set, so "the first gate state that matches" is the
+        // least one, and taking the minimum over the index says the same thing
+        // as the scan it replaces -- without asking every state about every
+        // other one, which on a SoC is half a million questions whose answers
+        // are all the same handful of names.
+        std::map<std::string, std::set<std::string>> gate_by_name;
         for (const auto &t : gate.states()) {
-            // with a map, a gate state carries the gold's name for it
             auto mapped = gate_to_gold.find(t);
-            if (mapped != gate_to_gold.end()) {
-                if (gsyn.count(mapped->second)) { common.emplace_back(g, t); break; }
-                continue;
+            if (mapped != gate_to_gold.end())
+                gate_by_name[mapped->second].insert(t);
+            else
+                for (const auto &n : gate.synonyms(t)) gate_by_name[n].insert(t);
+        }
+        for (const auto &g : gold.states()) {
+            const std::string *best = nullptr;
+            for (const auto &n : gold.synonyms(g)) {
+                auto it = gate_by_name.find(n);
+                if (it == gate_by_name.end() || it->second.empty()) continue;
+                const std::string &cand = *it->second.begin();
+                if (!best || cand < *best) best = &cand;
             }
-            auto tsyn = gate.synonyms(t);
-            bool shared = false;
-            for (const auto &n : gsyn)
-                if (tsyn.count(n)) { shared = true; break; }
-            if (shared) { common.emplace_back(g, t); break; }
+            if (best) common.emplace_back(g, *best);
         }
     }
     std::sort(common.begin(), common.end());

@@ -799,14 +799,24 @@ Lit Cones::eval_net(const std::string &raw, int depth)
     return result;
 }
 
+// Every name a net answers to.  Indexed on first use rather than scanned:
+// the caller is a register correspondence, which asks this about every state
+// on one side for every state on the other, and a scan of all the aliases per
+// question turns a matching pass over a SoC into five minutes of walking the
+// same chains again.  The index is the same answer, built once.
 std::set<std::string> Cones::synonyms(const std::string &net) const
 {
-    std::set<std::string> r{net};
-    for (const auto &[from, to] : alias_) {
-        (void)to;
-        if (resolve(from) == net)
-            r.insert(from);
+    if (!syn_built_) {
+        syn_built_ = true;
+        for (const auto &[from, to] : alias_) {
+            (void)to;
+            syn_[resolve(from)].insert(from);
+        }
     }
+    std::set<std::string> r{net};
+    auto it = syn_.find(net);
+    if (it != syn_.end())
+        r.insert(it->second.begin(), it->second.end());
     return r;
 }
 

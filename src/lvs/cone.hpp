@@ -140,6 +140,9 @@ class Cones
     std::set<std::string> states_, free_nets_, inputs_;
     std::map<std::string, Lit> memo_;
     std::map<std::string, std::string> rename_;   // this side's net -> shared symbol
+    // resolved net -> every name that resolves to it, built on first ask
+    mutable std::map<std::string, std::set<std::string>> syn_;
+    mutable bool syn_built_ = false;
 };
 
 } // namespace lvs
