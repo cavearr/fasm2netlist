@@ -222,6 +222,35 @@ int main(int argc, char **argv)
     };
     for (const auto &t : used) if (tiles.count(t)) load_type(tiles[t].type);
 
+    // ---- pseudo-PIPs: the connections that carry no bits ------------------
+    // ppips_<type>.db lists hardwired paths.  `always` is permanently on and
+    // appears in no bitstream, so a net graph built only from FASM features is
+    // missing them -- which leaves, among others, every slice's X bypass
+    // undriven and sitting at the pull-up.  `default` is on unless the
+    // destination is driven by a real PIP, so it is applied only where nothing
+    // else drives it.  `hint` is documentation and is ignored.
+    std::map<std::string, std::vector<std::array<std::string, 3>>> ppips; // type -> (dst,src,kind)
+    auto load_ppips = [&](const std::string &type) {
+        if (ppips.count(type)) return;
+        std::string lower;
+        for (char c : type) lower.push_back(char(tolower(c)));
+        std::ifstream in(db + "/ppips_" + lower + ".db");
+        std::vector<std::array<std::string, 3>> v;
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream ls(line);
+            std::string feat, kind;
+            if (!(ls >> feat >> kind)) continue;
+            auto d1 = feat.find('.');
+            if (d1 == std::string::npos) continue;
+            auto d2 = feat.find('.', d1 + 1);
+            if (d2 == std::string::npos) continue;
+            v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
+        }
+        ppips[type] = v;
+    };
+    for (const auto &t : used) if (tiles.count(t)) load_ppips(tiles[t].type);
+
     // ---- nets: (tile,wire), joined across tile boundaries ---------------
     Dsu dsu;
     auto tw = [](const std::string &t, const std::string &w) { return t + "/" + w; };
@@ -234,13 +263,27 @@ int main(int argc, char **argv)
     // connectivity rather than a radius, so it closes the chain without
     // dragging in the rest of the die.
     std::set<std::string> known;
-    for (const auto &kv : dc.other_tiles)
+    // ...and which wires a real PIP drives, which is what a "default"
+    // pseudo-PIP has to defer to.  Collected here because this is already the
+    // pass that reads the features, and the pseudo-PIPs are now applied during
+    // growth rather than after it.
+    std::set<std::string> pip_driven;
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        const std::vector<std::string> *sn =
+            ti == tiles.end() ? nullptr : &site_names[ti->second.type];
         for (const auto &feat : kv.second) {
             auto dot = feat.find('.');
-            if (dot == std::string::npos || feat.find('.', dot + 1) != std::string::npos) continue;
+            if (dot == std::string::npos) continue;
+            // A site's configuration has the same shape as a PIP; taking it
+            // for one puts wires in the net graph that the tile does not have.
+            if (sn && std::find(sn->begin(), sn->end(), feat.substr(0, dot)) != sn->end()) continue;
+            if (feat.find('.', dot + 1) != std::string::npos) continue;
             known.insert(tw(kv.first, feat.substr(0, dot)));
             known.insert(tw(kv.first, feat.substr(dot + 1)));
+            pip_driven.insert(tw(kv.first, feat.substr(0, dot)));
         }
+    }
     for (const auto &kv : dc.slices) {
         auto ti = tiles.find(kv.second.tile);
         if (ti == tiles.end()) continue;
@@ -262,7 +305,14 @@ int main(int argc, char **argv)
     // The loop already stops when a round adds nothing, so the fixpoint is
     // what the cap was truncating; the cap remains only as a guard against a
     // database that cycles, and says so if it is ever hit.
-    const int kMaxRounds = 64;
+    // Growth is a fixpoint over a finite set -- every round adds at least one
+    // (tile,wire) endpoint or stops -- so it terminates on its own, and the
+    // cap is insurance against a cyclic database rather than a schedule.  It
+    // was 64, and 64 was not enough: this SoC needs more, and the rounds it
+    // was not given were the ones that carry a signal out of a hard block and
+    // across the tiles that hold nothing but hardwiring.  Truncating growth
+    // does not fail, it silently returns a net with one end missing.
+    const int kMaxRounds = 1024;
 
     // The scan follows the frontier, not the die.  A round can only add an
     // endpoint next to one already known, so there is no reason to visit a
@@ -286,7 +336,9 @@ int main(int argc, char **argv)
     std::set<std::string> frontier_tiles;
     for (const auto &k : known) frontier_tiles.insert(tile_of(k));
 
-    int joins = 0, rounds = 0;
+    int joins = 0, rounds = 0, n_always = 0, n_default = 0;
+    bool settled = false;
+    std::vector<std::pair<std::string, std::string>> ppip_assigns;   // dst, src
     for (int round = 0; round < (hops > 0 ? hops : kMaxRounds); round++) {
         rounds = round + 1;
         size_t before = known.size();
@@ -323,41 +375,55 @@ int main(int argc, char **argv)
                 }
             }
         }
-        if (known.size() == before) break;
-        if (rounds == kMaxRounds)
-            std::cerr << "  warning: net growth did not settle in " << kMaxRounds
-                      << " rounds; some nets may be incomplete\n";
+        // The hardwired hops, in the same fixpoint.  A pseudo-PIP carries no
+        // configuration bit, so the tile it lives in can appear nowhere in the
+        // FASM -- and the tiles that hold nothing BUT hardwiring are exactly
+        // the ones a signal leaving a hard block passes through.  Applying
+        // these only to tiles the FASM names left an MMCM's LOCKED sitting on
+        // INT_INTERFACE_LOGIC_OUTS_L_B18 with nothing to carry it the one hop
+        // to LOGIC_OUTS_L18, where the interconnect could pick it up.
+        //
+        // And they belong INSIDE the loop, not after it: a hop makes a new
+        // endpoint reachable, and what that endpoint reaches is more tile
+        // connections, which is another round's work.  Run afterwards, the
+        // graph stops one hop short of wherever the last hardwired link was.
+        {
+            std::vector<std::string> visit(frontier_tiles.begin(), frontier_tiles.end());
+            visit.insert(visit.end(), next_tiles.begin(), next_tiles.end());
+            for (const auto &t : visit) {
+                auto it = tiles.find(t);
+                if (it == tiles.end()) continue;
+                load_ppips(it->second.type);
+                for (const auto &pp : ppips[it->second.type]) {
+                    if (pp[2] == "hint") continue;
+                    if (pp[2] == "default" && !use_default_ppips) continue;
+                    std::string dst = tw(t, pp[0]), src = tw(t, pp[1]);
+                    bool kd = known.count(dst), ks = known.count(src);
+                    if (!kd && !ks) continue;
+                    if (pip_driven.count(dst)) continue;
+                    ppip_assigns.push_back({dst, src});
+                    pip_driven.insert(dst);
+                    dsu.find(dst); dsu.find(src);
+                    if (!kd) { known.insert(dst); next_tiles.insert(t); }
+                    if (!ks) { known.insert(src); next_tiles.insert(t); }
+                    (pp[2] == "always" ? n_always : n_default)++;
+                }
+            }
+        }
+        if (known.size() == before) { settled = true; break; }
         frontier_tiles.swap(next_tiles);
     }
+    // Said after the loop, and only when the loop is what stopped: the test
+    // used to be "we reached round 64", which is not the same thing -- it
+    // fired on the round the cap happens to name even when the cap had been
+    // raised and the growth went on to finish, so a real truncation and a
+    // healthy long run were reported identically.
+    if (!settled)
+        std::cerr << "  warning: net growth did not settle in " << rounds
+                  << " rounds; some nets may be incomplete\n";
+    std::cerr << "  pseudo-PIPs applied: " << n_always << " always, " << n_default
+              << " default\n";
 
-    // ---- pseudo-PIPs: the connections that carry no bits ------------------
-    // ppips_<type>.db lists hardwired paths.  `always` is permanently on and
-    // appears in no bitstream, so a net graph built only from FASM features is
-    // missing them -- which leaves, among others, every slice's X bypass
-    // undriven and sitting at the pull-up.  `default` is on unless the
-    // destination is driven by a real PIP, so it is applied only where nothing
-    // else drives it.  `hint` is documentation and is ignored.
-    std::map<std::string, std::vector<std::array<std::string, 3>>> ppips; // type -> (dst,src,kind)
-    auto load_ppips = [&](const std::string &type) {
-        if (ppips.count(type)) return;
-        std::string lower;
-        for (char c : type) lower.push_back(char(tolower(c)));
-        std::ifstream in(db + "/ppips_" + lower + ".db");
-        std::vector<std::array<std::string, 3>> v;
-        std::string line;
-        while (std::getline(in, line)) {
-            std::istringstream ls(line);
-            std::string feat, kind;
-            if (!(ls >> feat >> kind)) continue;
-            auto d1 = feat.find('.');
-            if (d1 == std::string::npos) continue;
-            auto d2 = feat.find('.', d1 + 1);
-            if (d2 == std::string::npos) continue;
-            v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
-        }
-        ppips[type] = v;
-    };
-    for (const auto &t : used) if (tiles.count(t)) load_ppips(tiles[t].type);
 
     // ---- I/O: the fabric's edge ------------------------------------------
     // An IOB or IOI site is a buffer this prototype does not model, so the nets
@@ -480,32 +546,9 @@ int main(int argc, char **argv)
     }
 
 
-    // ---- pseudo-PIPs -----------------------------------------------------
-    // Hardwired paths that carry no configuration bit, so they appear in no
-    // FASM.  `always` is permanently on -- without it every slice's X bypass
-    // is undriven.  `default` applies only where no real PIP drives the
-    // destination.  `hint` is documentation.
-    {
-        std::set<std::string> pip_driven;
-        for (const auto &a : assigns) pip_driven.insert(a.first);
-        int n_always = 0, n_default = 0;
-        for (const auto &t : used) {
-            auto it = tiles.find(t);
-            if (it == tiles.end()) continue;
-            for (const auto &pp : ppips[it->second.type]) {
-                if (pp[2] == "hint") continue;
-                if (pp[2] == "default" && !use_default_ppips) continue;
-                std::string dst = tw(t, pp[0]), src = tw(t, pp[1]);
-                if (!known.count(dst) && !known.count(src)) continue;
-                if (pip_driven.count(dst)) continue;
-                assigns.push_back({dst, src});
-                pip_driven.insert(dst);
-                dsu.find(dst); dsu.find(src);
-                (pp[2] == "always" ? n_always : n_default)++;
-            }
-        }
-        std::cerr << "  pseudo-PIPs applied: " << n_always << " always, " << n_default << " default\n";
-    }
+    // The pseudo-PIPs were applied during growth, above; fold them in now that
+    // the FASM's own routing features have been read.
+    assigns.insert(assigns.end(), ppip_assigns.begin(), ppip_assigns.end());
 
     // ---- where the block RAMs are ----------------------------------------
     // Worked out once: the clock tree needs it below, and the instances that
@@ -1319,7 +1362,8 @@ endmodule
         std::cerr << "  " << bufg_outs.size() << " BUFG outputs: clock tree left to the routing,"
                   << " since one clock per design is what the simplification assumes\n";
     std::cerr << "tileverilog: " << dc.slices.size() << " slices, " << inst << " column instances, "
-              << assigns.size() << " routing assigns, " << roots.size() << " nets\n";
+              << assigns.size() << " routing assigns, " << roots.size() << " nets"
+              << " (net growth settled in " << rounds << " rounds)\n";
     if (unmodelled) std::cerr << "  " << unmodelled << " slice features not modelled (see tiledump --gaps)\n";
     if (skipped_site_cfg) std::cerr << "  " << skipped_site_cfg << " non-slice site features skipped\n";
     return 0;
