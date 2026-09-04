@@ -63,6 +63,67 @@ than omissions:
 IDELAY), the FIFO modes of the block RAMs (a `FIFO_MODE` site is emitted as a
 plain `RAMB18E1`, with a warning), and gigabit transceivers.
 
+## Proving the extraction: the tile model and `lvs_equiv`
+
+Extracting a netlist and proving it correct are different jobs, and this
+repository does both. `tileverilog` builds a second, independent netlist
+straight from the FASM -- every net named after the silicon it was read out of,
+so nothing can match by coincidence -- and `lvs_equiv` proves that netlist
+equal to the synthesis the bitstream was built from, register by register, with
+a SAT miter per cone.
+
+What the checker covers, and how:
+
+| | treated as |
+| --- | --- |
+| `LUT6_2`, `FDRE`/`FDSE`/`FDCE`/`FDPE` | modelled |
+| `CARRY4` | modelled, chained across slices |
+| `MUXF7`/`MUXF8` | modelled, built between columns as nextpnr packs them |
+| Distributed RAM | **cut** at its boundary |
+| Block RAM (`RAMB18E1`/`RAMB36E1`) | **cut** at its boundary |
+| I/O buffers, I/O logic, `IDELAYE2` | modelled as connections |
+| `MMCME2_ADV` | only `LOCKED` is cut; see below |
+
+A memory is *cut*, not modelled: its data outputs become free variables and
+every one of its inputs becomes an obligation, so what gets proved is that both
+sides wired the same nets to the same pins. That is what makes a design with
+memory in it provable at all without modelling the array, and the placement is
+what pairs one side's memory with the other's. The contents are **not** compared
+here -- `fasm2netlist` reads them out of the bitstream and
+`tests/rtl/build_and_check.py` compares them, which is where a Boolean
+equivalence check cannot help.
+
+Three things are assumed rather than reconstructed, and each is deliberate:
+
+- **The clock tree.** With one BUFG in the design there is only one thing a
+  clock pin can be, so they are joined to it. `--routed-clock` turns that off.
+  Clock pins are therefore not obligations, for the same reason a flip-flop's
+  `C` is never compared.
+- **The MMCM's configuration.** A frequency is not a Boolean fact. Its `LOCKED`
+  pin *is*, and is cut like any other hard-block output -- which matters
+  because a reset synchroniser waits on it.
+- **Memory contents**, as above.
+
+Not covered by the checker: `SRL`s, latches (`LDCE`/`LDPE`) and `DSP48E1`,
+all of which the extractor does decode.
+
+`lvs_equiv --explain` reports, for a failing cone, which named variables each
+side reads. Most failures turn out to be correspondence errors rather than
+logic errors, and the two look identical until you can see the supports.
+
+### What it has been run against
+
+`scripts/verify_examples.sh` in the parent repository builds each example from
+source and proves it. The largest is a LiteX SoC -- a SERV CPU with its BIOS in
+block RAM, its register file in distributed RAM, carry chains throughout and an
+MMCM:
+
+    2820 proved, 0 differ    (688 of 688 registers matched, 56 memory boundaries)
+
+Which yosys built a design changes what that proof is asking, so the parent
+repository pins yosys as a submodule and refuses to run the sweep with a
+different one.
+
 ### How the trickier decodes are pinned down
 
 Everything below is read off the fixed prjxray database and its own fuzzers,
