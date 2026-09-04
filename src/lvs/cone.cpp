@@ -1,5 +1,7 @@
 #include "lvs/cone.hpp"
 
+#include "bram_ports.hpp"
+
 #include <cstdlib>
 #include <stdexcept>
 
@@ -22,6 +24,34 @@ const std::map<std::string, std::string> BIDIR_RECEIVE = {{"IOBUF", "IO"}, {"IOB
 // which is exactly one SLICEM column, and is why the two sides can be matched
 // column for column.  The write address is port D's for both.
 const std::map<std::string, int> RAM_PORTS = {{"RAM64M", 1}, {"RAM32M", 2}};
+
+// The block RAMs.  Unlike a distributed RAM these are not modelled at all:
+// their data outputs are cut and every one of their inputs becomes an
+// obligation, so what gets proved is that the two sides wired the same nets to
+// the same pins.  That leaves exactly one premise unchecked -- that the two
+// have the same initial contents -- which is not a thing a boundary can say
+// and is checked where it can be, against the bitstream, in
+// tests/rtl/build_and_check.py.
+bool is_bram(const std::string &t) { return t == "RAMB18E1" || t == "RAMB36E1"; }
+// A block RAM's data outputs: the pins a cut turns into free variables.
+bool bram_data_out(const std::string &pin)
+{
+    return pin == "DOADO" || pin == "DOBDO" || pin == "DOPADOP" || pin == "DOPBDOP";
+}
+// Its ports, widths and directions, from the one table the extractor uses.
+// Calling the same pin by the same name on both sides is the whole mechanism:
+// two block RAMs pair when the placement says they are in the same site, and
+// what makes that pairing checkable is that "DIADI[7]" means the same thing
+// either way.
+std::vector<std::pair<std::string, int>> bram_ports(const std::string &type, bool out)
+{
+    std::vector<std::pair<std::string, int>> v;
+    if (type == "RAMB36E1")
+        for (const auto &p : bram::kRamb36) { if (p.out == out) v.push_back({p.port, p.width}); }
+    else
+        for (const auto &p : bram::kRamb18) { if (p.out == out) v.push_back({p.name, p.width}); }
+    return v;
+}
 
 // Which stored bit port `p` reads at address `a` on data bit `d`: the address
 // for a 64-deep port, and for a 32-deep one the two data bits are the two
@@ -113,6 +143,34 @@ std::string net_of_bit(const Expr &e, int bit)
     }
     default:
         return std::string();
+    }
+}
+
+// Whether bit `bit` of a connection is one the synthesis has no opinion
+// about: a pin it left unconnected, or a constant it wrote as x.  Both mean
+// "this does not matter", and turning either into an obligation asks the
+// prover a question with no answer.
+bool bit_is_dontcare(const Expr &e, int bit)
+{
+    switch (e.kind) {
+    case Expr::Kind::Unconnected:
+        return true;
+    case Expr::Kind::Const:
+        return e.const_text.find('x') != std::string::npos ||
+               e.const_text.find('z') != std::string::npos;
+    case Expr::Kind::Concat: {
+        int seen = 0;
+        for (auto it = e.parts.rbegin(); it != e.parts.rend(); ++it) {
+            int w = expr_width(*it);
+            if (bit < seen + w)
+                return bit_is_dontcare(*it, bit - seen);
+            seen += w;
+        }
+        return true;   // past the end of the concatenation: nothing is there
+    }
+    default:
+        // A named net that does not extend this far is not connected either.
+        return net_of_bit(e, bit).empty();
     }
 }
 
@@ -212,9 +270,25 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (inst.type == "INV" && pin.name == "O") ||
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
                           (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
-                          (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0);
+                          (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
+                          (is_bram(inst.type) && bram_data_out(pin.name));
             if (!is_out)
                 continue;
+            // A block RAM's data output is a bus, so each of its bits has to
+            // claim its own net -- a whole-pin driver would leave 15 of 16
+            // bits looking undriven and every one of them a fresh free
+            // variable that the other side has no counterpart for.
+            if (is_bram(inst.type)) {
+                for (const auto &p2 : bram_ports(inst.type, true))
+                    if (p2.first == pin.name)
+                        for (int b = 0; b < std::max(p2.second, 1); b++) {
+                            std::string bn = net_of_bit(pin.conn, b);
+                            if (bn.empty()) continue;
+                            driver_[bn] = Driver{&inst, pin.name};
+                            bram_out_[bn] = mem_cut_name(inst.name, pin.name, b);
+                        }
+                continue;
+            }
             std::string n;
             if (pin.conn.kind == Expr::Kind::Id)
                 n = pin.conn.name;
@@ -283,8 +357,66 @@ void Cones::collect_mem_ports()
         const Pin *p = inst.find_pin(pin);
         return p ? eval_expr(p->conn, 0) : dflt;
     };
+    auto group = [](const char *what, std::vector<Lit> bits) {
+        MemPort::Group g;
+        g.what = what;
+        g.bits = std::move(bits);
+        return g;
+    };
 
     for (const auto &inst : mod_.instances) {
+        if (is_bram(inst.type)) {
+            // A block RAM's boundary is its whole input side.  Listing it from
+            // the port table rather than picking out the interesting pins is
+            // the point: an unlisted input is one the cut quietly assumes
+            // agrees, and there is no way to know from here which of REGCEB or
+            // RSTRAMB a design leans on.
+            MemPort mp;
+            mp.where = inst.name;
+            for (const auto &p : bram_ports(inst.type, false)) {
+                // Not the clock.  The tile model does not reconstruct the
+                // clock tree, it assumes it: with one BUFG in the design there
+                // is only one thing a clock pin can be, and every clock pin is
+                // joined to it.  Under that assumption the two sides cannot
+                // disagree about a clock, so asking whether they do is not a
+                // question -- and the gate's clock is a module input while the
+                // synthesis's comes through an MMCM, so the two free variables
+                // would differ by name alone.  This is the same reason a
+                // flip-flop's C is never compared either.  --routed-clock
+                // turns the assumption off; nothing here is a substitute.
+                if (p.first.find("CLK") != std::string::npos) continue;
+                int n = std::max(p.second, 1);
+                MemPort::Group g;
+                g.what = p.first;
+                const Pin *pp = inst.find_pin(p.first);
+                // What the boundary compares is the value the SITE sees, not
+                // the value on the net: a control pin can be inverted on its
+                // way in.  The synthesis says so with IS_<pin>_INVERTED, the
+                // bitstream with a missing ZINV_<pin> tag, and the tile model
+                // spends a real inverter on it -- so applying the parameter
+                // here is what makes the two descriptions meet.  It is a
+                // no-op on the fabric side, which carries no such parameter.
+                bool inv = param_str(inst, "IS_" + p.first + "_INVERTED", "1'b0").back() == '1';
+                for (int b = 0; b < n; b++) {
+                    Lit v = pp ? eval_bit(pp->conn, b, 0) : LIT_FALSE;
+                    g.bits.push_back(inv ? negate(v) : v);
+                    // A pin the synthesis did not connect is one it has no
+                    // opinion about, so it is not an obligation.  The fabric
+                    // always has SOMETHING on the pin -- an unrouted one sits
+                    // on the interconnect pull-up -- and demanding that the
+                    // two agree would fail on pins neither design uses.
+                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, b));
+                }
+                mp.boundary.push_back(std::move(g));
+            }
+            for (const auto &p : bram_ports(inst.type, true)) {
+                if (!bram_data_out(p.first)) continue;
+                for (int b = 0; b < std::max(p.second, 1); b++)
+                    mp.out_sym.push_back(mem_cut_name(inst.name, p.first, b));
+            }
+            if (!mp.out_sym.empty()) mem_ports_.push_back(std::move(mp));
+            continue;
+        }
         if (RAM_PORTS.count(inst.type)) {
             // One MemPort per data port; each is 64 stored bits, which is one
             // fabric column, which is what makes them pairable one to one.
@@ -295,17 +427,20 @@ void Cones::collect_mem_ports()
                 if (!inst.find_pin(dopin)) continue;
                 MemPort mp;
                 mp.where = inst.name + " port " + port;
-                mp.read_addr = bits_of(inst, std::string("ADDR") + port, abits);
-                mp.write_addr = bits_of(inst, "ADDRD", abits);
-                mp.write_data = bits_of(inst, std::string("DI") + port, width);
+                mp.boundary.push_back(
+                    group("read address", bits_of(inst, std::string("ADDR") + port, abits)));
+                mp.boundary.push_back(group("write address", bits_of(inst, "ADDRD", abits)));
                 {
+                    MemPort::Group g =
+                        group("write data", bits_of(inst, std::string("DI") + port, width));
                     const Pin *dp = inst.find_pin(std::string("DI") + port);
                     bool dc = !dp || (dp->conn.kind == Expr::Kind::Const &&
                                       dp->conn.const_text.find('x') != std::string::npos) ||
                               dp->conn.kind == Expr::Kind::Unconnected;
-                    mp.write_dontcare.assign(width, dc);
+                    g.dontcare.assign(width, dc);
+                    mp.boundary.push_back(std::move(g));
                 }
-                mp.write_enable = lit_of(inst, "WE", LIT_FALSE);
+                mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
                 for (int d = 0; d < width; d++)
                     mp.out_sym.push_back(mem_cut_name(inst.name, dopin, d));
                 mem_ports_.push_back(std::move(mp));
@@ -317,14 +452,21 @@ void Cones::collect_mem_ports()
         int abits = small ? 5 : 6;
         MemPort mp;
         mp.where = inst.name;
-        for (int i = 0; i < abits; i++) {
-            const Pin *a = inst.find_pin("A" + std::to_string(i + 1));
-            mp.read_addr.push_back(a ? eval_expr(a->conn, 0) : LIT_FALSE);
+        {
+            std::vector<Lit> ra;
+            for (int i = 0; i < abits; i++) {
+                const Pin *a = inst.find_pin("A" + std::to_string(i + 1));
+                ra.push_back(a ? eval_expr(a->conn, 0) : LIT_FALSE);
+            }
+            mp.boundary.push_back(group("read address", std::move(ra)));
         }
-        mp.write_addr = bits_of(inst, "WA", abits);
-        mp.write_data.push_back(lit_of(inst, "DI", LIT_FALSE));
-        if (small) mp.write_data.push_back(lit_of(inst, "DI2", LIT_FALSE));
-        mp.write_enable = lit_of(inst, "WE", LIT_FALSE);
+        mp.boundary.push_back(group("write address", bits_of(inst, "WA", abits)));
+        {
+            std::vector<Lit> wd{lit_of(inst, "DI", LIT_FALSE)};
+            if (small) wd.push_back(lit_of(inst, "DI2", LIT_FALSE));
+            mp.boundary.push_back(group("write data", std::move(wd)));
+        }
+        mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
         for (int d = 0; d < (small ? 2 : 1); d++)
             mp.out_sym.push_back(mem_cut_name(inst.name, "DO", d));
         mem_ports_.push_back(std::move(mp));
@@ -574,6 +716,16 @@ Lit Cones::eval_net(const std::string &raw, int depth)
     } else if (inputs_.count(n)) {
         result = sym(n);
     } else {
+        auto bo = bram_out_.find(n);
+        if (bo != bram_out_.end()) {
+            // A block RAM read is a cut point: whatever came out of the array
+            // is a free variable, and the paired memory's read is renamed to
+            // the same one so the two cancel wherever they are used.
+            auto c2 = mem_cut_.find(bo->second);
+            result = net_.input(c2 == mem_cut_.end() ? bo->second : c2->second);
+            memo_[n] = result;
+            return result;
+        }
         auto d = driver_.find(n);
         if (d == driver_.end()) {
             // undriven: a free variable, and worth counting -- an undriven net

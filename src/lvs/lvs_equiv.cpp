@@ -293,7 +293,7 @@ static int run(int argc, char **argv)
         std::map<std::string, const Cones::MemPort *> by_sym;
         for (const auto &m : gp)
             if (!m.out_sym.empty()) by_sym[m.out_sym.front()] = &m;
-        int mem_pairs = 0;
+        int mem_pairs = 0, mem_unpaired = 0;
         for (const auto &t : tp) {
             if (t.out_sym.empty()) continue;
             auto want = mem_cuts.find(t.out_sym.front());
@@ -302,27 +302,36 @@ static int run(int argc, char **argv)
             if (g == by_sym.end()) continue;
             mem_pairs++;
             const Cones::MemPort &G = *g->second;
-            auto vec = [&](const char *what, const std::vector<Lit> &a, const std::vector<Lit> &b) {
-                size_t n = std::max(a.size(), b.size());
-                for (size_t i = 0; i < n; i++)
-                    check(t.where + " " + what + "[" + std::to_string(i) + "]",
-                          i < b.size() ? b[i] : LIT_FALSE, i < a.size() ? a[i] : LIT_FALSE);
-            };
-            vec("read address", t.read_addr, G.read_addr);
-            vec("write address", t.write_addr, G.write_addr);
-            {
-                size_t n = std::max(t.write_data.size(), G.write_data.size());
+            // The two sides list their boundary groups independently, so they
+            // are paired by name.  A group only one side has is not silently
+            // dropped: it is counted, because a boundary that is checked in
+            // part is not a boundary that justifies a cut.
+            std::map<std::string, const Cones::MemPort::Group *> gold_grp;
+            for (const auto &g2 : G.boundary) gold_grp[g2.what] = &g2;
+            for (const auto &tg : t.boundary) {
+                auto gg = gold_grp.find(tg.what);
+                if (gg == gold_grp.end()) { mem_unpaired++; continue; }
+                const auto &gb = *gg->second;
+                size_t n = std::max(tg.bits.size(), gb.bits.size());
                 for (size_t i = 0; i < n; i++) {
-                    if (i < G.write_dontcare.size() && G.write_dontcare[i]) continue;
-                    check(t.where + " write data[" + std::to_string(i) + "]",
-                          i < G.write_data.size() ? G.write_data[i] : LIT_FALSE,
-                          i < t.write_data.size() ? t.write_data[i] : LIT_FALSE);
+                    // The synthesis's don't-cares win: the fabric always has
+                    // something on a pin, and a pin the design never wired up
+                    // is not a claim about the circuit.
+                    if (i < gb.dontcare.size() && gb.dontcare[i]) continue;
+                    if (i < tg.dontcare.size() && tg.dontcare[i]) continue;
+                    check(t.where + " " + tg.what + "[" + std::to_string(i) + "]",
+                          i < gb.bits.size() ? gb.bits[i] : LIT_FALSE,
+                          i < tg.bits.size() ? tg.bits[i] : LIT_FALSE);
                 }
+                gold_grp.erase(gg);
             }
-            check(t.where + " write enable", G.write_enable, t.write_enable);
+            mem_unpaired += int(gold_grp.size());
         }
         std::cout << "memories: " << gp.size() << " gold, " << tp.size() << " gate, "
                   << mem_pairs << " paired and checked at the boundary\n";
+        if (mem_unpaired)
+            std::cout << "  " << mem_unpaired
+                      << " boundary group(s) named on one side only, so not checked\n";
     }
 
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

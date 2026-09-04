@@ -28,16 +28,24 @@ class Cones
     // the contents follow, whatever either side calls them.
     struct MemPort
     {
+        // One named group of boundary bits: a distributed RAM's read address,
+        // a block RAM's ENARDEN.  Named rather than positional because the two
+        // sides build their lists independently -- from a RAM64M on one side
+        // and an xcol on the other -- so the only thing that can pair two
+        // groups is what they are called, and a report has to be able to say
+        // which one failed.
+        struct Group
+        {
+            std::string what;
+            std::vector<Lit> bits;         // low bit first
+            // Bits the synthesis side left as x.  A memory port that is only
+            // ever read has no write data to speak of, and yosys says so;
+            // comparing the fabric's real signal against a don't-care asks a
+            // question with no answer, so those bits are not obligations.
+            std::vector<bool> dontcare;    // empty, or one flag per bit
+        };
         std::string where;                 // instance, for the report only
-        std::vector<Lit> read_addr;        // what a read selects
-        std::vector<Lit> write_addr;       // ...and what a write selects
-        std::vector<Lit> write_data;       // data, low bit first
-        // Bits the synthesis side left as x.  A memory port that is only ever
-        // read has no write data to speak of, and yosys says so; comparing the
-        // fabric's real signal against a don't-care asks a question with no
-        // answer, so those bits are not obligations.
-        std::vector<bool> write_dontcare;
-        Lit write_enable = LIT_FALSE;
+        std::vector<Group> boundary;
         std::vector<std::string> out_sym;  // the cut symbol each data bit reads
     };
     // Every memory port in this module, in a stable order.  Built on demand:
@@ -123,6 +131,9 @@ class Cones
     // same one, which is the whole of how a cut point works: downstream cones
     // then reference identical variables and cancel in the miter.
     std::map<std::string, std::string> mem_cut_;   // "inst/PORT/bit" -> symbol
+    // A block RAM is cut per data-output BIT, so the symbol has to be found
+    // from the net rather than from the pin: one pin carries sixteen of them.
+    std::map<std::string, std::string> bram_out_;  // net -> its cut symbol
     static std::string mem_state_name(const std::string &anchor, int bit);
     std::string ram_anchor(const Instance &inst, const std::string &pin, int width) const;
     static std::string mem_cut_name(const std::string &ram, const std::string &pin, int bit);

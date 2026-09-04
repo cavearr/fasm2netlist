@@ -2,6 +2,8 @@
 
 #include "json.hpp"
 
+#include "bram_ports.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <regex>
@@ -23,6 +25,23 @@ std::string slurp(const std::string &p)
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+// A block RAM's data outputs, which are the pins a comparison cuts at.  The
+// widths come from the same table the extractor and the tile model use, so a
+// port that is 32 bits wide is 32 bits wide in all three.  Everything else a
+// block RAM drives -- ECC, cascade, FIFO status -- is not data and is not cut.
+std::vector<std::pair<std::string, int>> data_outs(bool is36)
+{
+    std::vector<std::pair<std::string, int>> v;
+    if (is36) {
+        for (const auto &p : bram::kRamb36)
+            if (p.out && std::string(p.port).rfind("DO", 0) == 0) v.push_back({p.port, p.width});
+    } else {
+        for (const auto &p : bram::kRamb18)
+            if (p.out && std::string(p.name).rfind("DO", 0) == 0) v.push_back({p.name, p.width});
+    }
+    return v;
 }
 
 }  // namespace
@@ -60,11 +79,31 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         const json::Value &hide = nn.second.get("hide_name");
         bool hidden = !hide.isNull() && hide.asInt() != 0;
         const auto &bits = nn.second.get("bits").items();
+        // A vector need not start at zero.  `wire [4:2] o_cnt` is bits 0..2 of
+        // the JSON's list and o_cnt[2]..o_cnt[4] of every name anyone writes,
+        // and yosys records the difference as "offset" -- which, ignored, does
+        // not lose a name so much as invent a wrong one: o_cnt[0] labels the
+        // register the design calls o_cnt[2].  `upto` says the declaration ran
+        // the other way, [2:4], so the list is most significant first.
+        // Only three netnames in the LiteX SoC carry a non-zero offset, and
+        // one of them is the CPU's state counter, which most of the design
+        // reads; a single mislabelled register is not one bad cone but every
+        // cone downstream of it.
+        int64_t offset = 0;
+        {
+            const json::Value &o = nn.second.get("offset");
+            if (!o.isNull()) offset = o.asInt();
+        }
+        const json::Value &up = nn.second.get("upto");
+        bool upto = !up.isNull() && up.asInt() != 0;
         for (size_t i = 0; i < bits.size(); i++) {
             if (bits[i].type != json::Type::Int)
                 continue;
             int64_t b = bits[i].asInt();
-            std::string nm = bits.size() == 1 ? nn.first : nn.first + "[" + std::to_string(i) + "]";
+            int64_t idx = offset + (upto ? int64_t(bits.size()) - 1 - int64_t(i) : int64_t(i));
+            std::string nm = bits.size() == 1 && offset == 0
+                                 ? nn.first
+                                 : nn.first + "[" + std::to_string(idx) + "]";
             // Every name, hidden or not, is a CANDIDATE: the caller has to
             // find whichever one its own netlist emitted, and write_verilog
             // does not always choose the same one as this does.  Only the
@@ -77,7 +116,9 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             // is more correct, and the caller cannot know which its netlist
             // used, so offer both.
             if (bits.size() == 1)
-                alt_label[b].push_back(nn.first + "[0]");
+                alt_label[b].push_back(nn.first + "[" + std::to_string(idx) + "]");
+            if (bits.size() == 1 && offset == 0)
+                alt_label[b].push_back(nn.first);
             if (!hidden && !label.count(b))
                 label[b] = nm;
         }
@@ -134,13 +175,13 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
     // (SLICE_X42Y136), the fabric by the local suffix FASM uses (SLICEM_X0) --
     // so the ordinal has to be recovered here, where the tile grid is already
     // open.
+    auto sanitise = [](const std::string &in) {
+        std::string r;
+        for (char c : in) r.push_back(isalnum((unsigned char)c) ? c : '_');
+        return r;
+    };
     {
         static const std::regex dpr(R"(^(.*)/DPR(\d)(?:_(\d))?$)");
-        auto sanitise = [](const std::string &in) {
-            std::string r;
-            for (char c : in) r.push_back(isalnum((unsigned char)c) ? c : '_');
-            return r;
-        };
         for (const auto &pv : place.members()) {
             if (pv.second.get("type").asString() != "SLICE_LUTX") continue;
             std::smatch m;
@@ -169,6 +210,49 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             for (int d = 0; d < nbits; d++)
                 out.mem[gate + ":DO[" + std::to_string(d) + "]"] =
                     m[1].str() + ":DO" + port + "[" + std::to_string(d) + "]";
+        }
+    }
+
+    // Block RAM.  Nothing here has to understand what the memory does: the
+    // placement says which synthesis cell sits in which site, the tile model
+    // names its instance after that site, and pairing the two is enough for
+    // the checker to cut both at the same place and then prove the boundary.
+    // A RAMB18 site is the tile's lower or upper 18Kb half, which FASM -- and
+    // so the tile model -- calls RAMB18_Y0 and RAMB18_Y1; the placement names
+    // it absolutely (RAMB18_X2Y58), so the half has to be recovered here,
+    // where the tile grid is already open.
+    {
+        for (const auto &pv : place.members()) {
+            std::string bel = pv.second.get("bel").asString();
+            bool is36 = bel == "RAMB36E1";
+            if (bel != "RAMB18E1" && !is36) continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::string fasm_site = "RAMB36_Y0";
+            if (!is36) {
+                std::vector<std::pair<int, std::string>> halves;
+                for (const auto &sv : tv.get("sites").members()) {
+                    if (sv.first.rfind("RAMB18_", 0) != 0) continue;
+                    auto y = sv.first.rfind('Y');
+                    if (y == std::string::npos) continue;
+                    halves.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                }
+                std::sort(halves.begin(), halves.end());
+                int ord = -1;
+                for (size_t i = 0; i < halves.size(); i++)
+                    if (halves[i].second == site) ord = int(i);
+                if (ord < 0) continue;
+                fasm_site = "RAMB18_Y" + std::to_string(ord);
+            }
+            std::string gate = sanitise(tile + "_" + fasm_site);
+            for (const auto &dp : data_outs(is36))
+                for (int b = 0; b < dp.second; b++) {
+                    std::string suffix =
+                        std::string(":") + dp.first + "[" + std::to_string(b) + "]";
+                    out.mem[gate + suffix] = pv.first + suffix;
+                }
         }
     }
 

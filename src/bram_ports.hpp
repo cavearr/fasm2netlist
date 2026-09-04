@@ -80,6 +80,18 @@ inline constexpr Port36 kRamb36[] = {
     {"WEBWE", "WEBWEL", "WEBWEU", 8, false},
 };
 
+// The control inputs that have an inversion bit of their own.  prjxray stores
+// the attribute complemented, so an ABSENT "ZINV_<pin>" tag means the pin IS
+// inverted -- which is what an unused control pin looks like: nothing routes
+// to it, the interconnect holds it high, and the inversion makes the site see
+// the nought the design asked for.  Reading this list two different ways in
+// two different tools would put a reset on a memory in one netlist and not the
+// other, which is exactly the kind of difference a comparison exists to find.
+inline constexpr const char* kInvertible[] = {
+    "CLKARDCLK", "CLKBWRCLK", "ENARDEN",       "ENBWREN", "REGCLKARDRCLK",
+    "REGCLKB",   "RSTRAMB",   "RSTRAMARSTRAM", "RSTREGB", "RSTREGARSTREG",
+};
+
 } // namespace bram
 
 #endif

@@ -30,6 +30,8 @@
 #include "lvs/regmap.hpp"
 #include "lvs/tileconfig.hpp"
 
+#include "bram_ports.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -502,6 +504,79 @@ int main(int argc, char **argv)
         std::cerr << "  pseudo-PIPs applied: " << n_always << " always, " << n_default << " default\n";
     }
 
+    // ---- where the block RAMs are ----------------------------------------
+    // Worked out once: the clock tree needs it below, and the instances that
+    // get emitted further down need it again.
+    struct BramSite
+    {
+        std::string tile, site, cfg_site;
+        const char *prefix;
+        bool is36;
+        std::map<std::string, std::string> canon;   // canonical port -> tile wire
+    };
+    std::vector<BramSite> bram_sites;
+    for (const auto &tf : site_feats) {
+        const std::string &tile = tf.first;
+        auto ti = tiles.find(tile);
+        if (ti == tiles.end() || ti->second.type.rfind("BRAM_", 0) != 0) continue;
+        const auto &per = site_pins[ti->second.type];
+        // The three sites in a BRAM tile spell their PINS differently (prjxray
+        // types the lower 18Kb one FIFO18E1, so its pins carry FIFO names) but
+        // every site's WIRES are named after the primitive's own ports, so the
+        // port name reads off the wire and needs no translation table.
+        auto canon_of = [&](const char *prefix) {
+            std::map<std::string, std::string> c;
+            for (const auto &m : per) {
+                if (m.empty()) continue;
+                bool all = true;
+                for (const auto &pw : m)
+                    if (pw.second.rfind(prefix, 0) != 0) { all = false; break; }
+                if (!all) continue;
+                for (const auto &pw : m) c[pw.second.substr(strlen(prefix))] = pw.second;
+                break;
+            }
+            return c;
+        };
+        // 36Kb mode has no configuration bit of its own: prjxray's RAMB36 tags
+        // are all "this bit is clear", so a plain RAMB36 emits none of them.
+        // What does say so is which site's pins the tile's routing touches --
+        // the same test src/cells_bram.cpp makes, off the same features.  A
+        // 36Kb memory's control pins are still configured on its lower half.
+        bool is36 = false;
+        auto ot = dc.other_tiles.find(tile);
+        if (ot != dc.other_tiles.end())
+            for (const auto &f : ot->second)
+                if (f.find("BRAM_FIFO36_") != std::string::npos) { is36 = true; break; }
+        if (is36) {
+            bram_sites.push_back({tile, "RAMB36_Y0", "RAMB18_Y0", "BRAM_FIFO36_", true,
+                                  canon_of("BRAM_FIFO36_")});
+        } else {
+            for (const auto &sf : tf.second) {
+                const char *prefix = sf.first == "RAMB18_Y0"   ? "BRAM_FIFO18_"
+                                     : sf.first == "RAMB18_Y1" ? "BRAM_RAMB18_"
+                                                               : nullptr;
+                if (!prefix) continue;
+                bram_sites.push_back({tile, sf.first, sf.first, prefix, false, canon_of(prefix)});
+            }
+        }
+    }
+
+    // A block RAM is clocked by the same one BUFG as everything else, on the
+    // same argument the slices are joined on above: with a single clock in the
+    // design there is only one thing its clock pins can be.  Without this the
+    // memory's clock pin sits on the interconnect pull-up, and a boundary that
+    // compares a clock against a constant fails for a reason that has nothing
+    // to do with the design.
+    if (simple_clock && one_clock)
+        for (const auto &b : bram_sites)
+            for (const char *pin : {"CLKARDCLK", "CLKBWRCLK", "REGCLKARDRCLK", "REGCLKB",
+                                    "CLKARDCLKL", "CLKARDCLKU", "CLKBWRCLKL", "CLKBWRCLKU",
+                                    "REGCLKARDRCLKL", "REGCLKARDRCLKU", "REGCLKBL",
+                                    "REGCLKBU"}) {
+                auto it = b.canon.find(pin);
+                if (it != b.canon.end()) dsu.unite(tw(b.tile, it->second), bufg_outs.front());
+            }
+
     // With the tree simplified, the clock net's own routing features -- real
     // and pseudo alike -- drive it from pieces of a path we have replaced.
     std::string clock_root;
@@ -901,6 +976,104 @@ endmodule
         }
     }
 
+    // ---- block RAM: cut, not modelled ------------------------------------
+    // A RAMB18E1 or RAMB36E1 is instantiated here with nothing inside it, and
+    // that is the whole point.  The checker treats a memory's data outputs as
+    // free variables and every one of its inputs as an obligation, so what has
+    // to be right is the BOUNDARY -- which net reaches which pin -- and not
+    // the contents.  The synthesis side is cut in the same place, on the same
+    // primitive with the same port names, which is what lets the two cuts
+    // cancel and the cones downstream of a ROM become comparable at all.
+    //
+    // What this does NOT check is the initial contents.  Two block RAMs with
+    // identical boundaries and different INIT strings pass here.  That is a
+    // real gap and it is deliberate: `fasm2netlist` reads the contents out of
+    // the bitstream, and tests/rtl/build_and_check.py compares them.
+    int brams = 0;
+    std::vector<std::string> bram_wires;   // the outputs of the pin inverters
+    for (const auto &b : bram_sites) {
+        if (b.canon.empty()) continue;
+        // prjxray stores an inversion complemented, so the pins to invert are
+        // the ones with no ZINV tag.
+        std::set<std::string> inverted;
+        {
+            auto tfi = site_feats.find(b.tile);
+            if (tfi != site_feats.end()) {
+                auto cf = tfi->second.find(b.cfg_site);
+                if (cf != tfi->second.end())
+                    for (const char *pin : bram::kInvertible)
+                        if (std::find(cf->second.begin(), cf->second.end(),
+                                      "ZINV_" + std::string(pin)) == cf->second.end())
+                            inverted.insert(pin);
+            }
+        }
+        std::string iname = sanitise(b.tile + "_" + b.site);
+        std::ostringstream o;
+        bool first = true;
+
+        // One port of the primitive.  `base` is the site pin its bit 0 sits
+        // on; `baseU` the upper 18Kb half's copy, which exists only on the
+        // 36Kb site and which in 36Kb mode carries the same signal.
+        auto wire_up = [&](const char *port, int width, bool out, const std::string &base,
+                           const char *baseU) {
+            int n = width ? width : 1;
+            std::vector<std::string> bits;   // MSB first, as a concatenation is written
+            bool any = false;
+            for (int i = n - 1; i >= 0; i--) {
+                std::string suffix = width ? std::to_string(i) : std::string();
+                std::string bit;
+                std::vector<std::string> sps{base + suffix};
+                if (baseU) sps.push_back(baseU + suffix);
+                for (const auto &sp : sps) {
+                    auto it = b.canon.find(sp);
+                    if (it == b.canon.end()) continue;
+                    std::string raw = tw(b.tile, it->second);
+                    if (out) driven_raw.insert(raw);
+                    // Referencing the endpoint is what puts an unrouted pin on
+                    // the interconnect pull-up, the same as every other net
+                    // the design leaves alone.
+                    std::string nm = emit_net(raw);
+                    if (bit.empty()) bit = nm;
+                }
+                if (!bit.empty()) any = true;
+                bits.push_back(bit.empty() ? "1'b0" : bit);
+            }
+            if (!any) return;
+            // An inverted control pin gets a real inverter rather than a note
+            // in a parameter, because what a boundary compares is the value
+            // the site SEES.  The synthesis says the same thing the other way
+            // round, as IS_<pin>_INVERTED, and src/lvs/cone.cpp applies it
+            // there so that the two descriptions meet.  Every invertible pin
+            // is a scalar, so there is no bus case to get wrong.
+            if (!width && inverted.count(port)) {
+                std::string w = iname + "_" + port + "_inv";
+                bram_wires.push_back(w);
+                body << "  INV \\" << w << "_i (.I(" << bits[0] << "), .O(" << w << "));\n";
+                bits[0] = w;
+            }
+            o << (first ? "" : ", ") << "." << port << "(";
+            first = false;
+            if (width) {
+                o << "{";
+                for (size_t i = 0; i < bits.size(); i++) o << (i ? ", " : "") << bits[i];
+                o << "}";
+            } else {
+                o << bits[0];
+            }
+            o << ")";
+        };
+
+        if (b.is36)
+            for (const auto &p : bram::kRamb36) wire_up(p.port, p.width, p.out, p.pin, p.pinU);
+        else
+            for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, p.name, nullptr);
+        if (first) continue;   // the routing touches none of it
+        body << "  " << (b.is36 ? "RAMB36E1" : "RAMB18E1") << " \\" << iname << " (" << o.str()
+             << ");\n";
+        brams++;
+    }
+    if (brams) std::cerr << "  block RAMs cut at their boundary: " << brams << "\n";
+
     // now the module, in order: ports, internal nets, routing, instances.
     // Taken here, not earlier: resolving a slice's pins adds endpoints.
     std::set<std::string> roots;
@@ -1047,6 +1220,7 @@ endmodule
     for (const auto &a : assigns)
         os << "  assign " << emit_net(a.first) << " = " << emit_net(a.second) << ";\n";
     for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
+    for (const auto &w : bram_wires) os << "  wire " << w << ";\n";
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
     os << "\n" << body.str() << "endmodule\n";
 

@@ -71,10 +71,7 @@ std::string writeMode(const FeatMap& f, const std::string& ab) {
 // The inversion attributes are stored complemented ("ZINV_"), so an absent
 // tag is an inverted pin.
 void invParams(const FeatMap& f, std::vector<std::string>& params) {
-	static const char* pins[] = {"CLKARDCLK",     "CLKBWRCLK", "ENARDEN",       "ENBWREN",
-	                             "REGCLKARDRCLK", "REGCLKB",   "RSTRAMARSTRAM", "RSTRAMB",
-	                             "RSTREGARSTREG", "RSTREGB"};
-	for (const char* p : pins)
+	for (const char* p : bram::kInvertible)
 		params.push_back(".IS_" + std::string(p) + "_INVERTED(1'b" +
 		                 (featPresent(f, "ZINV_" + std::string(p)) ? "0" : "1") + ")");
 }
