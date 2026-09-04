@@ -106,6 +106,7 @@ static int run(int argc, char **argv)
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
     std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
+    std::map<std::string, lvs::RegMap::HardBlock> hard_blocks;
     std::map<std::string, std::vector<std::string>> gate_alts;  // other names for the same net
 
     // Build the register correspondence here rather than in a helper script:
@@ -121,6 +122,7 @@ static int run(int argc, char **argv)
         for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
         for (const auto &kv : rm.alt) gate_alts[sanitise(kv.first)] = kv.second;
         mem_cuts = rm.mem;
+        hard_blocks = rm.hard;
         if (!mem_cuts.empty())
             std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
         std::cout << "register map: " << rm.mapped << " from the placement";
@@ -406,6 +408,63 @@ static int run(int argc, char **argv)
         if (mem_unpaired)
             std::cout << "  " << mem_unpaired
                       << " boundary group(s) named on one side only, so not checked\n";
+    }
+
+    // The hard blocks.  A block has no cones, so nothing above this looks at
+    // one: the memories were cut at their boundary and everything else -- a
+    // clock manager, a transceiver, its reference-clock buffer -- is simply
+    // not part of a register-to-register comparison.  So say plainly which
+    // ones the synthesis asked for and whether the extraction has them at all.
+    //
+    // This is the check that was missing when a design proved 36 obligations
+    // with its transceiver reference clock switched off: the buffer was bound
+    // to its site and then dropped before the bitstream was written, and
+    // nothing in a cone comparison can notice an absent hard block.
+    if (!hard_blocks.empty()) {
+        std::map<std::string, int> by_type, missing_by_type;
+        std::vector<std::string> unmodelled, absent, dropped;
+        for (const auto &[cell, hb] : hard_blocks) {
+            by_type[hb.type]++;
+            if (hb.site.empty()) {
+                dropped.push_back(cell + " (" + hb.type + ")");
+                missing_by_type[hb.type]++;
+                continue;
+            }
+            if (hb.gate_name.empty()) {
+                unmodelled.push_back(cell + " (" + hb.type + " at " + hb.site + ")");
+                missing_by_type[hb.type]++;
+                continue;
+            }
+            bool found = false;
+            for (const auto &inst : gate_m->instances)
+                if (inst.name == hb.gate_name) { found = true; break; }
+            if (!found) {
+                absent.push_back(cell + " (" + hb.type + " at " + hb.site + ")");
+                missing_by_type[hb.type]++;
+            }
+        }
+        std::cout << "\nhard blocks: " << hard_blocks.size() << " placed by the synthesis";
+        if (!by_type.empty()) {
+            std::cout << " (";
+            bool first = true;
+            for (const auto &[t, n] : by_type) {
+                std::cout << (first ? "" : ", ") << n << "x " << t;
+                first = false;
+            }
+            std::cout << ")";
+        }
+        std::cout << "\n";
+        auto name_them = [](const char *what, const std::vector<std::string> &v) {
+            if (v.empty()) return;
+            std::cout << "  " << v.size() << " " << what << ":\n";
+            for (size_t i = 0; i < v.size() && i < 8; i++) std::cout << "    " << v[i] << "\n";
+            if (v.size() > 8) std::cout << "    ... and " << (v.size() - 8) << " more\n";
+        };
+        name_them("DROPPED between synthesis and placement -- in the netlist, placed nowhere", dropped);
+        name_them("the tile model does not model, so nothing here checks them", unmodelled);
+        name_them("MISSING from the extraction -- placed by the synthesis, absent from the bitstream", absent);
+        if (unmodelled.empty() && absent.empty() && dropped.empty())
+            std::cout << "  all present in the extraction\n";
     }
 
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

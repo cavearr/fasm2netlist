@@ -11,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <set>
 #include <vector>
 
 namespace lvs {
@@ -264,6 +265,62 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         if (bel != "MMCME2_ADV" && bel != "PLLE2_ADV") continue;
         std::string gate = sanitise(pv.second.get("tile").asString() + "_MMCME2_ADV");
         out.mem[gate + ":LOCKED[0]"] = pv.first + ":LOCKED[0]";
+    }
+
+    // The hard-block census.  Every block the placement put somewhere, with
+    // the name the tile model would give it if it models that kind at all.
+    // Nothing here compares behaviour -- a hard block has no cones to compare
+    // -- but a block the synthesis asked for and the bitstream does not
+    // configure is a real fault that register matching cannot see.
+    {
+        static const std::set<std::string> kHardBels = {
+            "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
+            "BUFGCTRL", "BUFR",     "BUFIO",    "IBUFDS_GTE2",   "GTXE2_CHANNEL",
+            "GTXE2_COMMON", "GTPE2_CHANNEL", "GTPE2_COMMON", "IDELAYCTRL",
+        };
+        // Enumerated from the SYNTHESIS, not from the placement.  The
+        // placement is written at the end of place-and-route, so a cell that
+        // was dropped along the way is simply not in it -- which is precisely
+        // the case worth catching, and a census built from the placement
+        // cannot see it by construction.
+        for (const auto &cv : mod->get("cells").members()) {
+            std::string bel = cv.second.get("type").asString();
+            if (!kHardBels.count(bel)) continue;
+            RegMap::HardBlock hb;
+            hb.type = bel;
+            const json::Value &pv2 = place.get(cv.first);
+            if (pv2.isNull()) {
+                // In the synthesis, nowhere in the placement: it did not
+                // survive packing.
+                hb.site = "";
+                out.hard[cv.first] = hb;
+                continue;
+            }
+            hb.site = pv2.get("site").asString();
+            std::string tile = pv2.get("tile").asString();
+            // Only the kinds the tile model actually emits get a gate name; the
+            // rest are reported as unmodelled, which is the honest answer.
+            if (bel == "RAMB18E1" || bel == "RAMB36E1") {
+                const json::Value &tv = grid.get(tile);
+                std::string fasm_site = bel == "RAMB36E1" ? "RAMB36_Y0" : "";
+                if (fasm_site.empty() && !tv.isNull()) {
+                    std::vector<std::pair<int, std::string>> halves;
+                    for (const auto &sv : tv.get("sites").members()) {
+                        if (sv.first.rfind("RAMB18_", 0) != 0) continue;
+                        auto y = sv.first.rfind('Y');
+                        if (y != std::string::npos)
+                            halves.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                    }
+                    std::sort(halves.begin(), halves.end());
+                    for (size_t i = 0; i < halves.size(); i++)
+                        if (halves[i].second == hb.site) fasm_site = "RAMB18_Y" + std::to_string(i);
+                }
+                if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
+            } else if (bel == "MMCME2_ADV" || bel == "PLLE2_ADV") {
+                hb.gate_name = sanitise(tile + "_MMCME2_ADV");
+            }
+            out.hard[cv.first] = hb;
+        }
     }
 
     for (const auto &pv : place.members()) {

@@ -29,6 +29,22 @@ struct RegMap {
     // modelled, so this is all a comparison needs from it: give both sides the
     // same symbols and what is left to prove is the boundary.
     std::map<std::string, std::string> mem;
+    // Every hard block the synthesis instantiates, with the site the placement
+    // put it in and the name the tile model would give it there.  A hard block
+    // is not compared cone by cone -- there are no cones inside one -- so
+    // without this a block can be placed and left entirely unconfigured while
+    // the proof still says every register matches.  That is not a hypothetical:
+    // an IBUFDS_GTE2 was bound to its site and then dropped before the FASM
+    // was written, so a design "proved" with its transceiver reference clock
+    // switched off.
+    struct HardBlock
+    {
+        std::string type;       // the bel, e.g. RAMB36E1, MMCME2_ADV
+        std::string site;       // where the placement put it
+        std::string gate_name;  // what the tile model calls it, if it models it
+    };
+    std::map<std::string, HardBlock> hard;   // gold cell name -> where it went
+
     std::string module;         // the gold module the labels came from
     int mapped = 0, skipped = 0;
 };
