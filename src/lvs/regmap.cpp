@@ -71,6 +71,13 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             // preferred label skips hidden names, and only because a report
             // reads better with "wdata0_r[0]" in it than "_0565_".
             alt_label[b].push_back(nm);
+            // A one-bit VECTOR is written both ways: the JSON netname is bare
+            // ("wdata0_r"), and write_verilog emits it indexed
+            // ("wdata0_r[0]") because it was declared [0:0].  Neither spelling
+            // is more correct, and the caller cannot know which its netlist
+            // used, so offer both.
+            if (bits.size() == 1)
+                alt_label[b].push_back(nn.first + "[0]");
             if (!hidden && !label.count(b))
                 label[b] = nm;
         }
