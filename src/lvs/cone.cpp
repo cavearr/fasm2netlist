@@ -701,9 +701,14 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
                 for (int b : used) rins.push_back(get_in(b));
                 return net_.mk_lut(rins, reduced);
             }
-            std::vector<Lit> ins;
-            for (int i = 0; i < 6; i++) ins.push_back(get_in(i));
-            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
+            // The address is not evaluated before deciding what this read
+            // IS.  A cut returns a free symbol and never looks at the address,
+            // so descending into it first buys nothing and can cost a great
+            // deal: the walk follows nets the answer does not depend on, and
+            // where one of those leads back here the checker calls it a
+            // combinational loop and breaks it with a constant.  The SD SoC
+            // has its FIFOs in distributed RAM, which is why it showed 33 of
+            // them where the design without the SD card showed none.
             if (!memory_as_state_) {
                 // A cut point, the same as the synthesis side's RAM: what a
                 // writable column reads is a free symbol, and the column it is
@@ -722,7 +727,11 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             // A writable column: the contents are STATE, so the read is a mux
             // over the stored bits rather than over a constant. Built as a
             // balanced tree from the low address bit up, which keeps it the
-            // same shape as mk_lut would have produced.
+            // same shape as mk_lut would have produced.  This is the one path
+            // that genuinely reads the address, so this is where it is built.
+            std::vector<Lit> ins;
+            for (int i = 0; i < 6; i++) ins.push_back(get_in(i));
+            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
             std::string anchor = n_for_output(inst, "O6");
             std::vector<Lit> level;
             level.reserve(1u << width);
