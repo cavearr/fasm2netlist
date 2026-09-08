@@ -718,6 +718,13 @@ int main(int argc, char **argv)
         std::set<std::string> already;
         for (const auto &a : assigns)
             already.insert(a.first);
+        // Pins a DDR register owns.  The database declares the site's output
+        // bypass as a hardwired pseudo-PIP and it is applied to every site,
+        // including the ones where a REGISTER drives the pin -- so the net
+        // ends up with two drivers, the register and a wire straight past it,
+        // and which one a reader believes is a coin toss.  Collected here and
+        // filtered out below, once the loop has seen every site.
+        std::set<std::string> ddr_driven;
         int bypassed = 0, unmodelled_io = 0, hardwired = 0;
         for (const auto &tkv : dc.other_tiles) {
             auto ti = tiles.find(tkv.first);
@@ -775,8 +782,10 @@ int main(int argc, char **argv)
                         // The site drives its outputs, so nothing else may.
                         for (const auto &pr : ds.ports)
                             if ((in && pr.first.rfind("Q", 0) == 0) ||
-                                (!in && pr.first == "Q"))
+                                (!in && pr.first == "Q")) {
                                 already.insert(tw(tkv.first, pr.second));
+                                ddr_driven.insert(tw(tkv.first, pr.second));
+                            }
                         ddr_sites.push_back(std::move(ds));
 
                         // An OLOGIC holds TWO registers, not one: the OUTFF on
@@ -815,8 +824,10 @@ int main(int argc, char **argv)
                                 ts.ports.push_back({(*pp)[0], q->second});
                             }
                             for (const auto &pr : ts.ports)
-                                if (pr.first == "Q")
+                                if (pr.first == "Q") {
                                     already.insert(tw(tkv.first, pr.second));
+                                    ddr_driven.insert(tw(tkv.first, pr.second));
+                                }
                             ddr_sites.push_back(std::move(ts));
                         }
                         continue;
@@ -855,6 +866,15 @@ int main(int argc, char **argv)
             if (unmodelled_io)
                 std::cerr << ", " << unmodelled_io << " doing more than a wire (not modelled)";
             std::cerr << "\n";
+        }
+        if (!ddr_driven.empty()) {
+            std::vector<std::pair<std::string, std::string>> kept;
+            for (const auto &a : assigns)
+                if (!ddr_driven.count(a.first)) kept.push_back(a);
+            if (kept.size() != assigns.size())
+                std::cerr << "  dropped " << (assigns.size() - kept.size())
+                          << " bypass assign(s) onto a pin a DDR register drives\n";
+            assigns.swap(kept);
         }
     }
 
