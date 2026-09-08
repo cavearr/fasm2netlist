@@ -88,6 +88,10 @@ class Cones
     // -- and the two sides of a comparison need not have picked the same one.
     std::set<std::string> synonyms(const std::string &net) const;
     const std::set<std::string> &free_nets() const { return free_nets_; }
+    // How many combinational loops were broken with a constant.  A run
+    // that broke any is a run in which some cone lost a dependency, so
+    // a proof from it is conditional on those loops being unreachable.
+    int loops_broken() const { return loops_seen_; }
     std::vector<std::pair<std::string, int>> output_bits() const;
 
   private:
@@ -138,6 +142,12 @@ class Cones
     std::string ram_anchor(const Instance &inst, const std::string &pin, int width) const;
     static std::string mem_cut_name(const std::string &ram, const std::string &pin, int bit);
     std::set<std::string> states_, free_nets_, inputs_;
+    // Nets whose evaluation is on the stack.  A re-entry is a
+    // combinational loop, and the constant it is broken with is
+    // indistinguishable from a real zero once built -- so it is counted.
+    std::set<std::string> in_progress_;
+    int loops_seen_ = 0;
+    std::vector<std::string> stack_;   // the descent, for naming a cycle
     std::map<std::string, Lit> memo_;
     std::map<std::string, std::string> rename_;   // this side's net -> shared symbol
     // resolved net -> every name that resolves to it, built on first ask

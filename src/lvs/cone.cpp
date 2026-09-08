@@ -1,3 +1,4 @@
+#include <iostream>
 #include "lvs/cone.hpp"
 
 #include "bram_ports.hpp"
@@ -652,23 +653,57 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
     }
 
     if (is_xcol(inst.type)) {
-        std::vector<Lit> ins;
-        for (int i = 1; i <= 6; i++) {
-            const Pin *p = inst.find_pin("A" + std::to_string(i));
-            ins.push_back(p ? eval_expr(p->conn, depth + 1) : LIT_TRUE);   // unused inputs pull up
-        }
+        auto get_in = [&](int b) {                                  // b is 0-based
+            const Pin *p = inst.find_pin("A" + std::to_string(b + 1));
+            return p ? eval_expr(p->conn, depth + 1) : LIT_TRUE;     // unused inputs pull up
+        };
         uint64_t init = parse_init(param_str(inst, "INIT", "0"));
         bool param_ram = param_str(inst, "RAM", "0") != "0";
         if (pin == "O6" || pin == "O5") {
             int width = (pin == "O6") ? 6 : 5;
-            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
-            (void)sel;
             if (!param_ram) {
                 // A fixed LUT: the contents are a constant, so the read is a
                 // truth table and no state is involved.
-                return (pin == "O6") ? net_.mk_lut(ins, init)
-                                     : net_.mk_lut(sel, init & 0xffffffffull);
+                //
+                // Descend ONLY into the inputs that truth table depends on.  A
+                // column holds two functions over the same five pins, and the
+                // router feeds a pin because the O6 half wants it -- the O5
+                // half is then wired to a signal it ignores.  Evaluating all
+                // six regardless walks a path the logic does not have, and on
+                // a real design that path closed a ring: B.O5 was routed
+                // D.O6, D.O6 read B's mux, and the checker called it a
+                // combinational loop and broke it with a constant.  Nothing
+                // said so -- the constant is indistinguishable from a real
+                // zero -- and every cone downstream of it quietly lost a
+                // dependency.  On vc707-sdtest that deleted a counter's carry
+                // and reported thirteen registers as differing.
+                //
+                // A don't-care input is not a dependency, so it is not a
+                // reason to descend.  This is also the smaller network.
+                uint64_t tt = (pin == "O6") ? init : (init & 0xffffffffull);
+                std::vector<int> used;
+                for (int b = 0; b < width; b++) {
+                    bool dep = false;
+                    for (uint32_t m = 0; m < (1u << width) && !dep; m++)
+                        if (((tt >> m) & 1) != ((tt >> (m ^ (1u << b))) & 1))
+                            dep = true;
+                    if (dep) used.push_back(b);
+                }
+                uint64_t reduced = 0;
+                for (uint32_t r = 0; r < (1u << used.size()); r++) {
+                    uint32_t m = 0;
+                    for (size_t k = 0; k < used.size(); k++)
+                        if ((r >> k) & 1) m |= 1u << used[k];
+                    if ((tt >> m) & 1) reduced |= 1ull << r;
+                }
+                std::vector<Lit> rins;
+                rins.reserve(used.size());
+                for (int b : used) rins.push_back(get_in(b));
+                return net_.mk_lut(rins, reduced);
             }
+            std::vector<Lit> ins;
+            for (int i = 0; i < 6; i++) ins.push_back(get_in(i));
+            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
             if (!memory_as_state_) {
                 // A cut point, the same as the synthesis side's RAM: what a
                 // writable column reads is a free symbol, and the column it is
@@ -766,8 +801,21 @@ Lit Cones::eval_net(const std::string &raw, int depth)
     std::string n = resolve(raw);
 
     auto it = memo_.find(n);
-    if (it != memo_.end())
+    if (it != memo_.end()) {
+        if (in_progress_.count(n)) {
+            if (loops_seen_++ < 2) {   // print a couple; count them all
+                std::cerr << "  warning: combinational loop broken at " << n
+                          << " -- its readers see a constant 0 here\n";
+                size_t at = stack_.size();
+                for (size_t i = 0; i < stack_.size(); i++)
+                    if (stack_[i] == n) { at = i; break; }
+                for (size_t i = at; i < stack_.size(); i++)
+                    std::cerr << "      " << (i == at ? "-> " : "   ") << stack_[i] << "\n";
+                std::cerr << "      back to " << n << "\n";
+            }
+        }
         return it->second;
+    }
 
     Lit result;
     auto c = const_net_.find(n);
@@ -803,8 +851,18 @@ Lit Cones::eval_net(const std::string &raw, int depth)
             free_nets_.insert(n);
             result = sym(n);
         } else {
-            memo_[n] = LIT_FALSE; // break loops while descending
+            // Break loops while descending.  A re-entry lands on this
+            // constant and it is baked into whatever was being built, so a
+            // false loop silently deletes a dependency rather than erroring:
+            // count them and name the first few, because "the cone lost the
+            // carry" and "the carry is genuinely zero" look identical once
+            // the constant is in place.
+            memo_[n] = LIT_FALSE;
+            in_progress_.insert(n);
+            stack_.push_back(n);
             result = eval_cell_output(*d->second.inst, d->second.pin, depth);
+            stack_.pop_back();
+            in_progress_.erase(n);
         }
     }
     memo_[n] = result;

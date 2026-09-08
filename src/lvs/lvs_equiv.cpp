@@ -317,6 +317,22 @@ static int run(int argc, char **argv)
                     if (v.size() > explain_cap) std::cout << " ...";
                     std::cout << "\n";
                 };
+                // Naming one signal prints what each side reads in full,
+                // rather than only the difference.  A difference set says
+                // which names are missing; it does not say what the cone that
+                // lost them is built from, and that is what you need when the
+                // netlist plainly carries a dependency the checker does not.
+                if (const char *want = getenv("LVS_SUPPORT_OF")) {
+                    if (label.find(want) != std::string::npos) {
+                        auto all = [&](const char *side, const std::set<std::string> &g) {
+                            std::cout << "            " << side << " reads (" << g.size() << "):";
+                            for (const auto &n : g) std::cout << " " << n;
+                            std::cout << "\n";
+                        };
+                        all("gold", ga);
+                        all("gate", gb);
+                    }
+                }
                 if (only_a.empty() && only_b.empty())
                     std::cout << "            same " << ga.size()
                               << " inputs on both sides, so the logic itself differs\n";
@@ -470,6 +486,15 @@ static int run(int argc, char **argv)
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "\n" << proved << " proved, " << differ << " differ, " << unknown << " unknown"
               << "   (" << secs << "s)\n";
+    // A broken loop is not a detail of the run, it is a caveat on its verdict:
+    // the constant it leaves behind deletes a dependency, so a cone can prove
+    // -- or differ -- for want of an input rather than on the merits.  Say so
+    // on every run that breaks one, next to the count that reads as a result.
+    if (gold.loops_broken() || gate.loops_broken())
+        std::cout << "combinational loops broken with a constant: "
+                  << gold.loops_broken() << " gold, " << gate.loops_broken()
+                  << " gate -- every cone downstream of one lost a dependency,\n"
+                     "  so these results are conditional on those paths\n";
     if (!gold.free_nets().empty() || !gate.free_nets().empty())
         std::cout << "undriven nets treated as free: " << gold.free_nets().size() << " gold, "
                   << gate.free_nets().size() << " gate\n";
