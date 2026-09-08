@@ -113,7 +113,23 @@ struct IoLogicConfig
     // seen so far inverts here; an ILOGIC that does would fail its proof,
     // which is the right way to find out rather than the wrong default.
     bool d_inverted = false;
+
+    // A DDR register in the site, rather than a wire through it.  These are
+    // cut at their boundary and instantiated as the primitive, exactly as a
+    // block RAM is: what has to be right is which net reaches which pin, and
+    // the synthesis side is cut on the same primitive with the same port
+    // names, so the two cuts cancel.  Modelling the two edges instead would
+    // put a negedge register into a proof that has no notion of one.
+    bool is_iddr = false;                // ILOGIC: IDDR.IN_USE
+    bool is_oddr = false;                // OLOGIC: OSERDES.DATA_RATE_OQ.DDR
+    bool serdes_wide = false;            // ...but a SERDES, not a plain DDR
+
     std::vector<std::string> unhandled;  // anything implying more than a wire
+
+    // True when the site holds a DDR register this model can cut at its
+    // boundary.  A wide SERDES is not that: it has no single primitive with a
+    // matching boundary on the synthesis side, so it stays unmodelled.
+    bool is_ddr_block() const { return (is_iddr || is_oddr) && !serdes_wide && unhandled.empty(); }
 
     // True when this site is a plain connection and nothing more.
     bool is_bypass() const
@@ -124,6 +140,9 @@ struct IoLogicConfig
         // That is the whole of what makes IDELAYE2 checkable here, and the
         // whole of what this check does not cover.
         if (is_delay) return true;
+        // A DDR site is not a bypass and never claims to be; it is emitted as
+        // the primitive instead of being dropped.
+        if (is_iddr || is_oddr) return false;
         return is_output ? (oq_used && omux == "D1") : !d_inverted;
     }
 };

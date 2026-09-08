@@ -157,6 +157,47 @@ DesignConfig read_fasm(const std::string &path)
             // The tristate path is not the data path: a pad driven all the
             // time still configures it, and BUF is that "always on" setting.
             else if (rest == "OSERDES.DATA_RATE_TQ.BUF") {}
+            // ...and neither is the inversion on it.  ZINV_T1 decides whether
+            // the pad drives when T is high or low, which changes WHEN the pad
+            // is driven and never WHAT it drives.  The data path is what this
+            // model states, and it does not state the tristate -- so a pad whose
+            // output enable is inverted passes here.  That is the same gap
+            // DATA_RATE_TQ.BUF above already leaves, named rather than widened.
+            else if (rest == "ZINV_T1" || rest == "ZINV_T2" ||
+                     rest == "ZINV_T3" || rest == "ZINV_T4") {}
+
+            // ---- DDR registers in the I/O site -----------------------------
+            // These say the site holds a register rather than a wire.  Recorded
+            // rather than dropped, so the extractor can cut the site at its
+            // boundary and instantiate the primitive -- see is_ddr_block().
+            else if (rest == "IDDR.IN_USE") io.is_iddr = true;
+            else if (rest == "OSERDES.DATA_RATE_OQ.DDR") io.is_oddr = true;
+            // A wide SERDES wears the same DDR bits but is a different thing:
+            // there is no single primitive whose boundary matches on the
+            // synthesis side, so mark it and let is_ddr_block() refuse rather
+            // than emit an ODDR that is not what the silicon holds.
+            else if (rest.rfind("OSERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            else if (rest.rfind("ISERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            // The rest configure a DDR register without changing which net
+            // reaches which pin, which is all the boundary cut asserts: initial
+            // and set/reset values, set/reset style, capture edge, the shared
+            // ISERDES plumbing an IDDR sits inside, and the inversions.
+            else if (rest == "IDDR_OR_ISERDES.IN_USE" || rest == "OSERDES.IN_USE" ||
+                     rest == "ODDR_TDDR.IN_USE" || rest == "ODDR.SRUSED" ||
+                     rest.rfind("ISERDES.MODE.", 0) == 0 ||
+                     rest.rfind("ISERDES.NUM_CE.", 0) == 0 ||
+                     rest.rfind("IFF.DDR_CLK_EDGE.", 0) == 0 ||
+                     rest.rfind("ODDR.DDR_CLK_EDGE.", 0) == 0 ||
+                     rest.rfind("IFF.SRTYPE.", 0) == 0 ||
+                     rest.rfind("OSERDES.SRTYPE.", 0) == 0 ||
+                     rest.rfind("OSERDES.TSRTYPE.", 0) == 0 ||
+                     rest.rfind("IFF.ZINIT_Q", 0) == 0 ||
+                     rest.rfind("IFF.ZSRVAL_Q", 0) == 0 ||
+                     rest == "ZINIT_OQ" || rest == "ZINIT_TQ" ||
+                     rest == "ZSRVAL_OQ" || rest == "ZSRVAL_TQ" ||
+                     rest == "IFF.ZINV_C" || rest == "ZINV_CLK") {}
+            // The counterpart of IDELMUXE3.P0 below: straight from the pad.
+            else if (rest == "IDELMUXE3.P1") io.delayed_input = false;
             // The ILOGIC input mux: P0 takes the delayed input from the
             // IDELAY beside it rather than the pad's own D.
             else if (rest == "IDELMUXE3.P0") io.delayed_input = true;

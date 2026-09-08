@@ -508,6 +508,15 @@ int main(int argc, char **argv)
 
     // ---- routing features: one assign each -------------------------------
     std::vector<std::pair<std::string, std::string>> assigns; // dst, src
+
+    // I/O sites holding a DDR register rather than a wire.  Recorded here and
+    // emitted further down, where net() exists: an instance pin written with a
+    // different spelling from the rest of the netlist splits the net in two.
+    struct DdrSite {
+        std::string tile, site, prim, iname;             // IDDR or ODDR
+        std::vector<std::pair<std::string, std::string>> ports; // port, tile wire
+    };
+    std::vector<DdrSite> ddr_sites;
     // A non-slice site's configuration, kept against the site that set it.
     // These are the features the model reads to know what a hard block is
     // configured as; the ones it has no use for are still counted, so the
@@ -732,6 +741,45 @@ int main(int argc, char **argv)
                     // the site's FASM name carries the same index its wires do
                     std::string idx = owire.substr(at + tag.size(), 1);
                     auto cfg = dc.iologic.find(tkv.first + "/" + tag + "_Y" + idx);
+                    // A DDR register is cut at its boundary and instantiated,
+                    // the way a block RAM is: the checker treats the outputs as
+                    // free and the inputs as obligations, so what is asserted is
+                    // which net reaches which pin.  The synthesis side is cut on
+                    // the same primitive with the same port names, so the two
+                    // cuts cancel.  Modelling the two edges instead would put a
+                    // negedge register into a proof with no notion of one.
+                    if (cfg != dc.iologic.end() && cfg->second.is_ddr_block() &&
+                        (kind == 0 || kind == 1)) {
+                        static const char *iddr_ports[][2] = {
+                            {"D", "D"}, {"C", "CLK"}, {"CE", "CE1"}, {"R", "SR"},
+                            {"Q1", "Q1"}, {"Q2", "Q2"}, {nullptr, nullptr}};
+                        static const char *oddr_ports[][2] = {
+                            {"Q", "OQ"}, {"C", "CLK"}, {"CE", "OCE"}, {"R", "SR"},
+                            {"D1", "D1"}, {"D2", "D2"}, {nullptr, nullptr}};
+                        const bool in = (kind == 0);
+                        DdrSite ds;
+                        ds.tile = tkv.first;
+                        ds.site = tag + "_Y" + idx;
+                        ds.prim = in ? "IDDR" : "ODDR";
+                        ds.iname = tkv.first + "_" + ds.site;
+                        for (auto pp = in ? iddr_ports : oddr_ports; (*pp)[0]; pp++) {
+                            const char *port = (*pp)[0];
+                            std::string sitepin = (*pp)[1];
+                            // The input mux may take the delayed tap instead.
+                            if (in && sitepin == "D" && cfg->second.delayed_input)
+                                sitepin = "DDLY";
+                            auto q = pins.find(sitepin);
+                            if (q == pins.end()) continue;
+                            ds.ports.push_back({port, q->second});
+                        }
+                        // The site drives its outputs, so nothing else may.
+                        for (const auto &pr : ds.ports)
+                            if ((in && pr.first.rfind("Q", 0) == 0) ||
+                                (!in && pr.first == "Q"))
+                                already.insert(tw(tkv.first, pr.second));
+                        ddr_sites.push_back(std::move(ds));
+                        continue;
+                    }
                     if (cfg != dc.iologic.end() && !cfg->second.is_bypass()) {
                         unmodelled_io++;
                         continue;
@@ -761,6 +809,8 @@ int main(int argc, char **argv)
         if (bypassed || hardwired || unmodelled_io) {
             std::cerr << "  I/O logic: " << bypassed << " pass-through added, " << hardwired
                       << " already hardwired";
+            if (!ddr_sites.empty())
+                std::cerr << ", " << ddr_sites.size() << " DDR cut at their boundary";
             if (unmodelled_io)
                 std::cerr << ", " << unmodelled_io << " doing more than a wire (not modelled)";
             std::cerr << "\n";
@@ -1180,6 +1230,35 @@ endmodule
         brams++;
     }
     if (brams) std::cerr << "  block RAMs cut at their boundary: " << brams << "\n";
+
+    // ---- DDR registers, cut at their boundary --------------------------
+    // Same contract as the block RAMs above: the primitive is instantiated
+    // empty, and what the proof asserts is the boundary.  An IDDR's Q1 and Q2
+    // become free variables and its D, C, CE and R become obligations; the
+    // synthesis side carries the same primitive with the same port names, so
+    // the cuts cancel and the cones on either side stay comparable.
+    //
+    // What this does NOT check is the capture edge, the initial value or the
+    // set/reset value.  Two IDDRs with the same boundary and different
+    // DDR_CLK_EDGE pass here.  That is a real gap, and the honest one: the
+    // alternative is a negedge register in a proof that has no notion of one.
+    for (const auto &d : ddr_sites) {
+        std::ostringstream o;
+        bool first = true;
+        for (const auto &pr : d.ports) {
+            std::string raw = tw(d.tile, pr.second);
+            // Outputs are driven by this instance and by nothing else, the same
+            // bookkeeping a block RAM's data outputs get.
+            if (pr.first == "Q" || pr.first.rfind("Q", 0) == 0)
+                driven_raw.insert(raw);
+            o << (first ? "" : ", ") << "." << pr.first << "(" << emit_net(raw) << ")";
+            first = false;
+        }
+        if (first) continue;   // the routing touches none of it
+        body << "  " << d.prim << " \\" << d.iname << " (" << o.str() << ");\n";
+    }
+    if (!ddr_sites.empty())
+        std::cerr << "  DDR registers cut at their boundary: " << ddr_sites.size() << "\n";
 
     // ---- the clock manager's LOCKED pin --------------------------------
     // The MMCM itself is not modelled and cannot usefully be: what comes out
