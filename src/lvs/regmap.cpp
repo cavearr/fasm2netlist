@@ -277,6 +277,11 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
             "BUFGCTRL", "BUFR",     "BUFIO",    "IBUFDS_GTE2",   "GTXE2_CHANNEL",
             "GTXE2_COMMON", "GTPE2_CHANNEL", "GTPE2_COMMON", "IDELAYCTRL",
+            // The DDR registers in an I/O site.  The tile model cuts these at
+            // their boundary, so they need the same correspondence a block RAM
+            // gets: without it the two sides carry the same primitive under
+            // different names and the cuts cannot cancel.
+            "IDDR", "ODDR",
         };
         // Enumerated from the SYNTHESIS, not from the placement.  The
         // placement is written at the end of place-and-route, so a cell that
@@ -318,6 +323,29 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                 if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
             } else if (bel == "MMCME2_ADV" || bel == "PLLE2_ADV") {
                 hb.gate_name = sanitise(tile + "_MMCME2_ADV");
+            } else if (bel == "IDDR" || bel == "ODDR") {
+                // The placement names the site as the device does,
+                // ILOGIC_X0Y11; the FASM and the tile model name it by its
+                // position within the tile, ILOGIC_Y1.  Enumerate the tile's
+                // sites of that kind and index them, exactly as the RAMB18
+                // halves above are, rather than parsing the Y and hoping.
+                const char *pfx = bel == "IDDR" ? "ILOGIC_" : "OLOGIC_";
+                const json::Value &tv = grid.get(tile);
+                std::string fasm_site;
+                if (!tv.isNull()) {
+                    std::vector<std::pair<int, std::string>> at;
+                    for (const auto &sv : tv.get("sites").members()) {
+                        if (sv.first.rfind(pfx, 0) != 0) continue;
+                        auto y = sv.first.rfind('Y');
+                        if (y != std::string::npos)
+                            at.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                    }
+                    std::sort(at.begin(), at.end());
+                    for (size_t i = 0; i < at.size(); i++)
+                        if (at[i].second == hb.site)
+                            fasm_site = std::string(pfx) + "Y" + std::to_string(i);
+                }
+                if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
             }
             out.hard[cv.first] = hb;
         }
