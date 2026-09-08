@@ -38,9 +38,21 @@ const std::set<std::string> WIDE_MUX = {"MUXF7", "MUXF8", "MUXF9"};
 // Boolean fact.  The clock tree those outputs feed is assumed rather than
 // reconstructed for the same reason (see the note on clock pins below), and
 // this is the same assumption reaching one signal further.
+//
+// The DDR registers in the I/O logic are here for a different reason.  Both
+// sides CAN compute them, but not in a way a combinational miter can compare:
+// the second output is captured on the falling edge, and a proof with no
+// notion of an edge cannot state that.  So both sides cut the same primitive
+// at the same pins, and the placement pairs them -- which is what makes the
+// two cuts cancel instead of becoming two unrelated free variables.  Leaving
+// them unpaired does not weaken the proof, it destroys it: every cone
+// downstream of a pad reads a symbol the other side has never heard of, and
+// differs for that reason alone.
 const std::map<std::string, std::set<std::string>> OPAQUE_OUT = {
     {"MMCME2_ADV", {"LOCKED"}},
     {"PLLE2_ADV", {"LOCKED"}},
+    {"IDDR", {"Q1", "Q2"}},
+    {"ODDR", {"Q"}},
 };
 bool is_opaque_out(const std::string &type, const std::string &pin)
 {

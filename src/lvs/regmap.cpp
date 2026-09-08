@@ -273,6 +273,10 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
     // -- but a block the synthesis asked for and the bitstream does not
     // configure is a real fault that register matching cannot see.
     {
+        // The pins a DDR cut turns into free variables -- see OPAQUE_OUT
+        // in cone.cpp, which must cut exactly these.
+        static const std::vector<const char *> kIddrOuts = {"Q1", "Q2"};
+        static const std::vector<const char *> kOddrOuts = {"Q"};
         static const std::set<std::string> kHardBels = {
             "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
             "BUFGCTRL", "BUFR",     "BUFIO",    "IBUFDS_GTE2",   "GTXE2_CHANNEL",
@@ -341,11 +345,45 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                             at.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
                     }
                     std::sort(at.begin(), at.end());
-                    for (size_t i = 0; i < at.size(); i++)
-                        if (at[i].second == hb.site)
-                            fasm_site = std::string(pfx) + "Y" + std::to_string(i);
+                    // ...and then INVERT the index.  The FASM name is not the
+                    // position in the tile, it is its complement: nextpnr's
+                    // write_iol_config spells it `1 - siteloc.y`, and the
+                    // bitstreams agree -- in LIOI_TBYTESRC_X82Y8 the SD command
+                    // pad sits at the lower site, ILOGIC_X0Y7, and both Vivado
+                    // and nextpnr write its IDDR to ILOGIC_Y1.  Indexing
+                    // straight names the OTHER site, which for a tile with one
+                    // half in use reads as a hard block missing from the
+                    // extraction, and for a tile with both in use silently
+                    // pairs each cell with its neighbour.
+                    //
+                    // A _SING_ tile holds one half, and which one it is depends
+                    // on where the tile sits relative to its HCLK row rather
+                    // than on anything here.  Rather than guess, leave it
+                    // unnamed: an unmodelled block is reported as such, and a
+                    // wrong pairing is not.
+                    if (at.size() == 2)
+                        for (size_t i = 0; i < at.size(); i++)
+                            if (at[i].second == hb.site)
+                                fasm_site = std::string(pfx) + "Y" + std::to_string(1 - i);
                 }
-                if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
+                // An OLOGIC holds two registers and the synthesis spends a
+                // cell on each: OUTFF on the data path, TFF on the tristate.
+                // They share a site, so the site name alone collides -- and a
+                // collision here is silent, two cells claiming one gate.  The
+                // placement names the bel; use it.
+                if (!fasm_site.empty()) {
+                    std::string bel_name = pv2.get("bel").asString();
+                    if (bel == "ODDR" && bel_name == "TFF") fasm_site += "_TFF";
+                    hb.gate_name = sanitise(tile + "_" + fasm_site);
+                    // Naming the pair is not enough: the cut has to be joined
+                    // too, the way a block RAM's data outputs are, or each
+                    // side invents its own free variable for the same pin and
+                    // everything the pad feeds differs on the strength of the
+                    // name alone.
+                    for (const char *pin : (bel == "IDDR" ? kIddrOuts : kOddrOuts))
+                        out.mem[hb.gate_name + ":" + pin + "[0]"] =
+                            cv.first + ":" + pin + "[0]";
+                }
             }
             out.hard[cv.first] = hb;
         }

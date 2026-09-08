@@ -123,6 +123,7 @@ struct IoLogicConfig
     bool is_iddr = false;                // ILOGIC: IDDR.IN_USE
     bool is_oddr = false;                // OLOGIC: OSERDES.DATA_RATE_OQ.DDR
     bool serdes_wide = false;            // ...but a SERDES, not a plain DDR
+    bool tddr_in_use = false;            // OLOGIC: ODDR_TDDR.IN_USE, the T register
 
     std::vector<std::string> unhandled;  // anything implying more than a wire
 

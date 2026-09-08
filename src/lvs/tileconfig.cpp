@@ -165,6 +165,12 @@ DesignConfig read_fasm(const std::string &path)
             // DATA_RATE_TQ.BUF above already leaves, named rather than widened.
             else if (rest == "ZINV_T1" || rest == "ZINV_T2" ||
                      rest == "ZINV_T3" || rest == "ZINV_T4") {}
+            // The tristate path can hold a REGISTER, though, and that is not a
+            // gap that can be left: the synthesis spends a whole ODDR cell on
+            // it, bound to the site's TFF bel beside the OUTFF the data path
+            // uses.  Extract only the data register and the two sides disagree
+            // by one cell per bidirectional pad -- six of them on an SD bus.
+            else if (rest == "ODDR_TDDR.IN_USE") io.tddr_in_use = true;
 
             // ---- DDR registers in the I/O site -----------------------------
             // These say the site holds a register rather than a wire.  Recorded

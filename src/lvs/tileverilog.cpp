@@ -778,6 +778,47 @@ int main(int argc, char **argv)
                                 (!in && pr.first == "Q"))
                                 already.insert(tw(tkv.first, pr.second));
                         ddr_sites.push_back(std::move(ds));
+
+                        // An OLOGIC holds TWO registers, not one: the OUTFF on
+                        // the data path and the TFF on the tristate path, each
+                        // a separate ODDR cell in the synthesis.  Emit the
+                        // second whenever the site says its T register is in
+                        // use, or a bidirectional pad is short by one cell and
+                        // everything the pad feeds reads as different.
+                        // ...but IN_USE alone over-states it.  An
+                        // output-only pad wears the bit too -- the SD clock
+                        // does -- while its netlist holds no tristate cell at
+                        // all, and emitting one there swaps a missing cell for
+                        // a spurious one.  What separates the two is the
+                        // routing: a real tristate has the fabric driving T1.
+                        // On this design that test picks out exactly the five
+                        // sites prjxray also marks ZINV_T1, which is the
+                        // independent confirmation that it picks the right ones.
+                        auto t1 = pins.find("T1");
+                        const bool t_driven = t1 != pins.end() &&
+                                              pip_driven.count(tw(tkv.first, t1->second));
+                        if (!in && cfg->second.tddr_in_use && t_driven) {
+                            static const char *tddr_ports[][2] = {
+                                {"Q", "TQ"}, {"C", "CLK"}, {"CE", "TCE"},
+                                {"R", "SR"}, {"D1", "T1"}, {"D2", "T2"},
+                                {nullptr, nullptr}};
+                            DdrSite ts;
+                            ts.tile = tkv.first;
+                            ts.site = tag + "_Y" + idx;
+                            ts.prim = "ODDR";
+                            // Two cells in one site need two names, and the
+                            // suffix is the bel the placement already names.
+                            ts.iname = tkv.first + "_" + ts.site + "_TFF";
+                            for (auto pp = tddr_ports; (*pp)[0]; pp++) {
+                                auto q = pins.find((*pp)[1]);
+                                if (q == pins.end()) continue;
+                                ts.ports.push_back({(*pp)[0], q->second});
+                            }
+                            for (const auto &pr : ts.ports)
+                                if (pr.first == "Q")
+                                    already.insert(tw(tkv.first, pr.second));
+                            ddr_sites.push_back(std::move(ts));
+                        }
                         continue;
                     }
                     if (cfg != dc.iologic.end() && !cfg->second.is_bypass()) {
