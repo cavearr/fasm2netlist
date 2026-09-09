@@ -681,6 +681,35 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
                 // A don't-care input is not a dependency, so it is not a
                 // reason to descend.  This is also the smaller network.
                 uint64_t tt = (pin == "O6") ? init : (init & 0xffffffffull);
+
+                // Restrict the table by any input that is TIED first.  A pin
+                // held at VCC or GND selects half the table, and the other
+                // inputs' relevance is decided by the half that survives, not
+                // by the whole.  On vc707-litex a column had A6 tied high and
+                // an A5 the full table depends on but the A6=1 half does not
+                // -- and A5 was routed from the column's own output.  Judged
+                // on the raw table that reads as a dependency, so the walk
+                // followed it, came back to a net already on the stack, and
+                // called a harmless piece of routing a combinational loop.
+                // It oscillates only if the function inverts around it; this
+                // one ignores the input entirely.
+                std::vector<std::pair<int,bool>> tied;
+                for (int b = 0; b < width; b++) {
+                    const Pin *q = inst.find_pin("A" + std::to_string(b + 1));
+                    if (!q) continue;
+                    std::string n = resolve(net_of_bit(q->conn, 0));
+                    auto c = const_net_.find(n);
+                    if (c != const_net_.end()) tied.push_back({b, c->second});
+                }
+                for (auto [b, v] : tied) {
+                    uint64_t out = 0;
+                    for (uint32_t m = 0; m < (1u << width); m++) {
+                        uint32_t src = v ? (m | (1u << b)) : (m & ~(1u << b));
+                        if ((tt >> src) & 1) out |= 1ull << m;
+                    }
+                    tt = out;
+                }
+
                 std::vector<int> used;
                 for (int b = 0; b < width; b++) {
                     bool dep = false;
@@ -729,9 +758,18 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
             // balanced tree from the low address bit up, which keeps it the
             // same shape as mk_lut would have produced.  This is the one path
             // that genuinely reads the address, so this is where it is built.
-            std::vector<Lit> ins;
-            for (int i = 0; i < 6; i++) ins.push_back(get_in(i));
-            std::vector<Lit> sel(ins.begin(), ins.begin() + width);
+            //
+            // Only `width` of them.  A 32-deep column addresses on A1..A5 and
+            // never reads A6, so walking all six follows a net the read does
+            // not depend on -- and where that net leads back here the checker
+            // calls it a combinational loop and substitutes a constant, which
+            // is how a design that proved 2820/0 came to differ on 155 nets
+            // after a placement change moved one wire.  Same rule as the
+            // fixed-LUT path above: a pin the function does not use is not a
+            // reason to descend.
+            std::vector<Lit> sel;
+            sel.reserve(width);
+            for (int i = 0; i < width; i++) sel.push_back(get_in(i));
             std::string anchor = n_for_output(inst, "O6");
             std::vector<Lit> level;
             level.reserve(1u << width);
