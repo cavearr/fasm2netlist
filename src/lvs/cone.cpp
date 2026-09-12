@@ -2,6 +2,7 @@
 #include "lvs/cone.hpp"
 
 #include "bram_ports.hpp"
+#include "dsp_ports.hpp"
 
 #include <cstdlib>
 #include <stdexcept>
@@ -85,6 +86,9 @@ const std::map<std::string, int> RAM_PORTS = {{"RAM64M", 1}, {"RAM32M", 2}};
 // and is checked where it can be, against the bitstream, in
 // tests/rtl/build_and_check.py.
 bool is_bram(const std::string &t) { return t == "RAMB18E1" || t == "RAMB36E1"; }
+// The DSP, cut the same way and for the same reason: nothing here models a
+// multiply-accumulate, so its results are freed and its operands obliged.
+bool is_dsp(const std::string &t) { return t == "DSP48E1"; }
 // A block RAM's data outputs: the pins a cut turns into free variables.
 bool bram_data_out(const std::string &pin)
 {
@@ -325,7 +329,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
                           (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
                           (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
-                          (is_bram(inst.type) && bram_data_out(pin.name));
+                          (is_bram(inst.type) && bram_data_out(pin.name)) ||
+                          (is_dsp(inst.type) && dsp::is_data_out(pin.name.c_str()));
             if (!is_out)
                 continue;
             // A memory's data output is a BUS, and every bit of it has to
@@ -343,6 +348,9 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             } else if (is_bram(inst.type)) {
                 for (const auto &p2 : bram_ports(inst.type, true))
                     if (p2.first == pin.name) mem_width = std::max(p2.second, 1);
+            } else if (is_dsp(inst.type)) {
+                for (const auto &p2 : dsp::kDsp48e1)
+                    if (pin.name == p2.name) mem_width = std::max(p2.width, 1);
             } else if (!memory_as_state_ && RAM_PORTS.count(inst.type) &&
                        pin.name.rfind("DO", 0) == 0) {
                 // Not under the state model: that one wants the whole pin, to

@@ -3,6 +3,7 @@
 #include "json.hpp"
 
 #include "bram_ports.hpp"
+#include "dsp_ports.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -332,6 +333,43 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                 if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
             } else if (bel == "MMCME2_ADV" || bel == "PLLE2_ADV") {
                 hb.gate_name = sanitise(tile + "_MMCME2_ADV");
+            } else if (bel == "DSP48E1") {
+                // The placement names the site as the device does, DSP48_X2Y56;
+                // the FASM and the tile model name it by its position within
+                // the tile, DSP_0 or DSP_1.  Index the tile's sites of that
+                // kind rather than parsing the Y, exactly as the RAMB18 halves
+                // above are.
+                const json::Value &tv = grid.get(tile);
+                std::string fasm_site;
+                if (!tv.isNull()) {
+                    std::vector<std::pair<int, std::string>> at;
+                    for (const auto &sv : tv.get("sites").members()) {
+                        if (sv.first.rfind("DSP48_", 0) != 0) continue;
+                        auto y = sv.first.rfind('Y');
+                        if (y != std::string::npos)
+                            at.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                    }
+                    std::sort(at.begin(), at.end());
+                    for (size_t i = 0; i < at.size(); i++)
+                        if (at[i].second == hb.site) fasm_site = "DSP_" + std::to_string(i);
+                }
+                if (!fasm_site.empty()) {
+                    hb.gate_name = sanitise(tile + "_" + fasm_site);
+                    // Join the cut as well as naming the pair -- see the note
+                    // on the DDR registers below.  A DSP's results are freed
+                    // on both sides, so without this each side invents its own
+                    // variable for the same pin and everything reading the
+                    // product differs on the strength of the name alone.
+                    for (const auto &dp : dsp::kDsp48e1) {
+                        if (!dp.out) continue;
+                        int w = dp.width ? dp.width : 1;
+                        for (int b = 0; b < w; b++) {
+                            std::string suffix =
+                                std::string(":") + dp.name + "[" + std::to_string(b) + "]";
+                            out.mem[hb.gate_name + suffix] = cv.first + suffix;
+                        }
+                    }
+                }
             } else if (bel == "IDDR" || bel == "ODDR") {
                 // The placement names the site as the device does,
                 // ILOGIC_X0Y11; the FASM and the tile model name it by its

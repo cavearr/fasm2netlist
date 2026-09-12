@@ -34,6 +34,7 @@
 #include "lvs/tileconfig.hpp"
 
 #include "bram_ports.hpp"
+#include "dsp_ports.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -1291,6 +1292,79 @@ endmodule
         brams++;
     }
     if (brams) std::cerr << "  block RAMs cut at their boundary: " << brams << "\n";
+
+    // ---- DSP48E1: cut, not modelled -------------------------------------
+    // Same treatment as a block RAM and for the same reason: nothing here
+    // models a multiply-accumulate.  The outputs are cut into free variables
+    // and every input becomes an obligation, so what is proved is the
+    // BOUNDARY -- which net reaches which pin -- and the two sides' cuts
+    // cancel because they name the same primitive over the same pins.
+    //
+    // Without this the block is simply absent from the extraction, and every
+    // cone reading its result differs against a synthesis that has one.  That
+    // reads as a place-and-route fault and is not one.
+    //
+    // Taken from dc.other_tiles, not site_feats: a DSP's configuration is
+    // spelled "<tile>.DSP48.DSP_0.<feature>", whose first component names a
+    // feature group rather than a site, so the site-feature parser files it
+    // under nothing and counts it as skipped.  The clock manager below is
+    // reached the same way for the same reason.
+    int dsps = 0;
+    for (const auto &kv : dc.other_tiles) {
+        const std::string &tile = kv.first;
+        auto ti = tiles.find(tile);
+        if (ti == tiles.end() || ti->second.type.rfind("DSP_", 0) != 0) continue;
+        for (const auto &per_site : site_pins[ti->second.type]) {
+            if (per_site.empty()) continue;
+            // Which of the tile's two sites this is, read off the wires
+            // rather than assumed from the map's order.
+            std::string site;
+            for (const auto &pw : per_site) {
+                auto us = pw.second.find('_', 4);
+                if (pw.second.rfind("DSP_", 0) == 0 && us != std::string::npos) {
+                    site = pw.second.substr(0, us);
+                    break;
+                }
+            }
+            if (site.empty()) continue;
+            std::string iname = sanitise(tile + "_" + site);
+            std::ostringstream o;
+            bool first = true;
+            for (const auto &port : dsp::kDsp48e1) {
+                int n = port.width ? port.width : 1;
+                std::vector<std::string> bits;   // MSB first, as written
+                bool any = false;
+                for (int i = n - 1; i >= 0; i--) {
+                    std::string pin = port.name;
+                    if (port.width) pin += std::to_string(i);
+                    std::string bit;
+                    auto it = per_site.find(pin);
+                    if (it != per_site.end()) {
+                        std::string rawnet = tw(tile, it->second);
+                        if (port.out) driven_raw.insert(rawnet);
+                        bit = emit_net(rawnet);
+                    }
+                    if (!bit.empty()) any = true;
+                    bits.push_back(bit.empty() ? "1'b0" : bit);
+                }
+                if (!any) continue;
+                o << (first ? "" : ", ") << "." << port.name << "(";
+                first = false;
+                if (port.width) {
+                    o << "{";
+                    for (size_t i = 0; i < bits.size(); i++) o << (i ? ", " : "") << bits[i];
+                    o << "}";
+                } else {
+                    o << bits[0];
+                }
+                o << ")";
+            }
+            if (first) continue;   // the routing touches none of it
+            body << "  DSP48E1 \\" << iname << " (" << o.str() << ");\n";
+            dsps++;
+        }
+    }
+    if (dsps) std::cerr << "  DSPs cut at their boundary: " << dsps << "\n";
 
     // ---- DDR registers, cut at their boundary --------------------------
     // Same contract as the block RAMs above: the primitive is instantiated
