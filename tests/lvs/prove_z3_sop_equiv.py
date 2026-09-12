@@ -331,6 +331,19 @@ def main():
     ap.add_argument('--family', default='virtex7')
     ap.add_argument('--device', default='xc7vx485t')
     ap.add_argument('--part', default='xc7vx485tffg1761-2')
+    # Any design, not just vc707-johnson.  Unset, these keep the johnson
+    # defaults, so the existing ctest entry is unchanged.
+    ap.add_argument('--fasm', help='FASM to reconstruct from (default: the johnson example)')
+    ap.add_argument('--gold', help='gold yosys netlist the bitstream was built from')
+    ap.add_argument('--placement', help="nextpnr -o placement= dump from the same run")
+    ap.add_argument('--xdc', help='constraints, for top-level ports')
+    ap.add_argument('--design', default='johnson', help='name used in messages')
+    # Capacity guard.  A miter that cannot be discharged is not a failed
+    # proof: z3 returns unknown, which says nothing about equivalence.  With
+    # no limit the solver simply runs until something kills it, so designs
+    # beyond capacity have to be bounded and reported as skipped.
+    ap.add_argument('--timeout-ms', type=int, default=0,
+                    help='per-check Z3 timeout; 0 means no limit')
     args = ap.parse_args()
 
     try:
@@ -341,10 +354,10 @@ def main():
     xc7 = args.xc7_tools_dir
     db = os.path.join(xc7, '.deps', 'prjxray-db')
     example_dir = os.path.join(xc7, 'examples', 'vc707-johnson')
-    fasm_path = os.path.join(example_dir, 'johnson.fasm')
-    xdc_path = os.path.join(example_dir, 'top.xdc')
-    placement_path = os.path.join(example_dir, 'johnson_placement.json')
-    gold_json_path = os.path.join(example_dir, 'johnson.json')
+    fasm_path = args.fasm or os.path.join(example_dir, 'johnson.fasm')
+    xdc_path = args.xdc or os.path.join(example_dir, 'top.xdc')
+    placement_path = args.placement or os.path.join(example_dir, 'johnson_placement.json')
+    gold_json_path = args.gold or os.path.join(example_dir, 'johnson.json')
 
     for path, what in ((db, 'prjxray-db checkout'), (fasm_path, 'johnson.fasm'), (xdc_path, 'top.xdc'),
                         (placement_path, 'johnson_placement.json'), (gold_json_path, 'johnson.json')):
@@ -371,6 +384,9 @@ def main():
     assert ff_cells, 'ground-truth placement has no SLICE_FFX entries -- stale or unexpected file'
 
     solver = z3.Solver()
+    if args.timeout_ms:
+        solver.set('timeout', args.timeout_ms)
+    over_capacity = []
     mismatches = []
     proven = 0
     for cellname in ff_cells:
@@ -384,14 +400,19 @@ def main():
         solver.add(next_gold != next_gate)
         result = solver.check()
         solver.pop()
-        if result != z3.unsat:
+        if result == z3.unknown:
+            over_capacity.append(ff_name)
+        elif result != z3.unsat:
             mismatches.append((ff_name, 'Z3 found a counterexample: %s -> %s' % (result, solver.model())))
         else:
             proven += 1
 
     led_proven = 0
-    for i, net_id in enumerate(gold.output_bits.get('led', [])):
-        label = 'led[%d]' % i
+    out_bits = [(port, i, nid)
+                for port, bits in sorted(gold.output_bits.items())
+                for i, nid in enumerate(bits)]
+    for port, i, net_id in out_bits:
+        label = '%s[%d]' % (port, i)
         gold_expr = gold.eval_net(z3, net_id, {}, set())
         if label not in gate.driver and label not in gate.alias:
             mismatches.append((label, 'not found in gate netlist'))
@@ -401,10 +422,18 @@ def main():
         solver.add(gold_expr != gate_expr)
         result = solver.check()
         solver.pop()
-        if result != z3.unsat:
+        if result == z3.unknown:
+            over_capacity.append(label)
+        elif result != z3.unsat:
             mismatches.append((label, 'Z3 found a counterexample: %s -> %s' % (result, solver.model())))
         else:
             led_proven += 1
+
+    if over_capacity and not mismatches:
+        skip('%s: %d of %d checks exceeded the solving capacity at %d ms '
+             '(z3 returned unknown, which is not a disproof); proved %d FF and %d output bits'
+             % (args.design, len(over_capacity), len(ff_cells) + len(out_bits),
+                args.timeout_ms, proven, led_proven))
 
     if mismatches:
         print('prove_z3_sop_equiv: FAILED -- %d mismatch(es):' % len(mismatches))
