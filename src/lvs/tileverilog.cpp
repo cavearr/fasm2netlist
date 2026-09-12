@@ -1327,6 +1327,16 @@ endmodule
                 }
             }
             if (site.empty()) continue;
+            // Only a site the FASM configures.  Every site's pins are in the
+            // database whether the design uses them or not, so emitting on
+            // the strength of the pin map alone puts a fully wired DSP in the
+            // netlist for the tile's OTHER half -- a block the design does
+            // not have, reading nets nothing drives.  The features name the
+            // site they belong to, so ask them.
+            bool configured = false;
+            for (const auto &feat : kv.second)
+                if (feat.rfind("DSP48." + site + ".", 0) == 0) { configured = true; break; }
+            if (!configured) continue;
             std::string iname = sanitise(tile + "_" + site);
             std::ostringstream o;
             bool first = true;
