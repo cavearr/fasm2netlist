@@ -279,6 +279,11 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         static const std::vector<const char *> kOddrOuts = {"Q"};
         static const std::set<std::string> kHardBels = {
             "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
+            // Enumerated from the synthesis, so the names here are the ones
+            // yosys emits: a design needing no dynamic reconfiguration gets
+            // the BASE primitive, and the census must know it or the block
+            // goes uncounted.
+            "MMCME2_BASE", "PLLE2_BASE",
             "BUFGCTRL", "BUFR",     "BUFIO",    "IBUFDS_GTE2",   "GTXE2_CHANNEL",
             "GTXE2_COMMON", "GTPE2_CHANNEL", "GTPE2_COMMON", "IDELAYCTRL",
             // The DDR registers in an I/O site.  The tile model cuts these at

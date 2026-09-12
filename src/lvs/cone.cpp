@@ -52,6 +52,16 @@ const std::set<std::string> WIDE_MUX = {"MUXF7", "MUXF8", "MUXF9"};
 const std::map<std::string, std::set<std::string>> OPAQUE_OUT = {
     {"MMCME2_ADV", {"LOCKED"}},
     {"PLLE2_ADV", {"LOCKED"}},
+    // The same block under the name synthesis gives it.  A bitstream only
+    // knows the site, which is always the ADV superset, but yosys emits
+    // whichever primitive the design instantiated -- and a design that asks
+    // for no dynamic reconfiguration asks for the BASE one.  Cutting only
+    // the ADV name cuts one side of the pair: the gate side becomes a free
+    // variable and the gold side tries to evaluate through a clock manager,
+    // so everything reading LOCKED differs for a reason that has nothing to
+    // do with the design.  The placement pairs them by site either way.
+    {"MMCME2_BASE", {"LOCKED"}},
+    {"PLLE2_BASE", {"LOCKED"}},
     {"IDDR", {"Q1", "Q2"}},
     {"ODDR", {"Q"}},
 };
