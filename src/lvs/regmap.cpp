@@ -2,12 +2,16 @@
 
 #include "json.hpp"
 
+#include "bram_ports.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <regex>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <set>
 #include <vector>
 
 namespace lvs {
@@ -22,6 +26,23 @@ std::string slurp(const std::string &p)
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+// A block RAM's data outputs, which are the pins a comparison cuts at.  The
+// widths come from the same table the extractor and the tile model use, so a
+// port that is 32 bits wide is 32 bits wide in all three.  Everything else a
+// block RAM drives -- ECC, cascade, FIFO status -- is not data and is not cut.
+std::vector<std::pair<std::string, int>> data_outs(bool is36)
+{
+    std::vector<std::pair<std::string, int>> v;
+    if (is36) {
+        for (const auto &p : bram::kRamb36)
+            if (p.out && std::string(p.port).rfind("DO", 0) == 0) v.push_back({p.port, p.width});
+    } else {
+        for (const auto &p : bram::kRamb18)
+            if (p.out && std::string(p.name).rfind("DO", 0) == 0) v.push_back({p.name, p.width});
+    }
+    return v;
 }
 
 }  // namespace
@@ -54,19 +75,61 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
     // invention ($abc$...) and tell the reader nothing, so they are skipped;
     // the first real name to claim a bit wins.
     std::map<int64_t, std::string> label;
+    std::map<int64_t, std::vector<std::string>> alt_label;
     for (const auto &nn : mod->get("netnames").members()) {
         const json::Value &hide = nn.second.get("hide_name");
-        if (!hide.isNull() && hide.asInt() != 0)
-            continue;
+        bool hidden = !hide.isNull() && hide.asInt() != 0;
         const auto &bits = nn.second.get("bits").items();
+        // A vector need not start at zero.  `wire [4:2] o_cnt` is bits 0..2 of
+        // the JSON's list and o_cnt[2]..o_cnt[4] of every name anyone writes,
+        // and yosys records the difference as "offset" -- which, ignored, does
+        // not lose a name so much as invent a wrong one: o_cnt[0] labels the
+        // register the design calls o_cnt[2].  `upto` says the declaration ran
+        // the other way, [2:4], so the list is most significant first.
+        // Only three netnames in the LiteX SoC carry a non-zero offset, and
+        // one of them is the CPU's state counter, which most of the design
+        // reads; a single mislabelled register is not one bad cone but every
+        // cone downstream of it.
+        int64_t offset = 0;
+        {
+            const json::Value &o = nn.second.get("offset");
+            if (!o.isNull()) offset = o.asInt();
+        }
+        const json::Value &up = nn.second.get("upto");
+        bool upto = !up.isNull() && up.asInt() != 0;
         for (size_t i = 0; i < bits.size(); i++) {
             if (bits[i].type != json::Type::Int)
                 continue;
             int64_t b = bits[i].asInt();
-            if (!label.count(b))
-                label[b] = bits.size() == 1 ? nn.first : nn.first + "[" + std::to_string(i) + "]";
+            int64_t idx = offset + (upto ? int64_t(bits.size()) - 1 - int64_t(i) : int64_t(i));
+            std::string nm = bits.size() == 1 && offset == 0
+                                 ? nn.first
+                                 : nn.first + "[" + std::to_string(idx) + "]";
+            // Every name, hidden or not, is a CANDIDATE: the caller has to
+            // find whichever one its own netlist emitted, and write_verilog
+            // does not always choose the same one as this does.  Only the
+            // preferred label skips hidden names, and only because a report
+            // reads better with "wdata0_r[0]" in it than "_0565_".
+            alt_label[b].push_back(nm);
+            // A one-bit VECTOR is written both ways: the JSON netname is bare
+            // ("wdata0_r"), and write_verilog emits it indexed
+            // ("wdata0_r[0]") because it was declared [0:0].  Neither spelling
+            // is more correct, and the caller cannot know which its netlist
+            // used, so offer both.
+            if (bits.size() == 1)
+                alt_label[b].push_back(nn.first + "[" + std::to_string(idx) + "]");
+            if (bits.size() == 1 && offset == 0)
+                alt_label[b].push_back(nn.first);
+            if (!hidden && !label.count(b))
+                label[b] = nm;
         }
     }
+    // A bit no real name claimed still needs one, or its register goes
+    // unmatched -- and an unmatched register is not one missing cone, it makes
+    // every cone downstream of it incomparable too.
+    for (const auto &[b, names] : alt_label)
+        if (!label.count(b) && !names.empty())
+            label[b] = names.front();
 
     // site pins, per tile type, in the order the tile lists its sites
     std::map<std::string, std::vector<std::map<std::string, std::string>>> tt_pins;
@@ -107,6 +170,225 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         return none;
     };
 
+    // Memories.  A placement cell called "<ram>/DPR<n>" at a site's <col>6LUT
+    // is port n of that synthesis RAM held in that fabric column.  The
+    // netlists name the site differently -- the placement absolutely
+    // (SLICE_X42Y136), the fabric by the local suffix FASM uses (SLICEM_X0) --
+    // so the ordinal has to be recovered here, where the tile grid is already
+    // open.
+    auto sanitise = [](const std::string &in) {
+        std::string r;
+        for (char c : in) r.push_back(isalnum((unsigned char)c) ? c : '_');
+        return r;
+    };
+    {
+        static const std::regex dpr(R"(^(.*)/DPR(\d)(?:_(\d))?$)");
+        for (const auto &pv : place.members()) {
+            if (pv.second.get("type").asString() != "SLICE_LUTX") continue;
+            std::smatch m;
+            const std::string cell = pv.first;
+            if (!std::regex_match(cell, m, dpr)) continue;
+            std::string bel = pv.second.get("bel").asString();
+            if (bel.empty() || bel[0] < 'A' || bel[0] > 'D') continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::vector<std::pair<int, std::string>> sl;
+            for (const auto &sv : tv.get("sites").members())
+                if (sv.first.rfind("SLICE_X", 0) == 0)
+                    sl.push_back({atoi(sv.first.c_str() + 7), sv.first});
+            std::sort(sl.begin(), sl.end());
+            int ord = -1;
+            for (size_t i = 0; i < sl.size(); i++)
+                if (sl[i].second == site) ord = int(i);
+            if (ord < 0) continue;
+            std::string stype = tv.get("sites").get(site).asString();
+            std::string gate = sanitise(tile + "_" + stype + "_X" + std::to_string(ord) + "_" +
+                                        std::string(1, bel[0]));
+            char port = char('A' + (m[2].str()[0] - '0'));
+            int nbits = m[3].matched ? 2 : 1;
+            for (int d = 0; d < nbits; d++)
+                out.mem[gate + ":DO[" + std::to_string(d) + "]"] =
+                    m[1].str() + ":DO" + port + "[" + std::to_string(d) + "]";
+        }
+    }
+
+    // Block RAM.  Nothing here has to understand what the memory does: the
+    // placement says which synthesis cell sits in which site, the tile model
+    // names its instance after that site, and pairing the two is enough for
+    // the checker to cut both at the same place and then prove the boundary.
+    // A RAMB18 site is the tile's lower or upper 18Kb half, which FASM -- and
+    // so the tile model -- calls RAMB18_Y0 and RAMB18_Y1; the placement names
+    // it absolutely (RAMB18_X2Y58), so the half has to be recovered here,
+    // where the tile grid is already open.
+    {
+        for (const auto &pv : place.members()) {
+            std::string bel = pv.second.get("bel").asString();
+            bool is36 = bel == "RAMB36E1";
+            if (bel != "RAMB18E1" && !is36) continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::string fasm_site = "RAMB36_Y0";
+            if (!is36) {
+                std::vector<std::pair<int, std::string>> halves;
+                for (const auto &sv : tv.get("sites").members()) {
+                    if (sv.first.rfind("RAMB18_", 0) != 0) continue;
+                    auto y = sv.first.rfind('Y');
+                    if (y == std::string::npos) continue;
+                    halves.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                }
+                std::sort(halves.begin(), halves.end());
+                int ord = -1;
+                for (size_t i = 0; i < halves.size(); i++)
+                    if (halves[i].second == site) ord = int(i);
+                if (ord < 0) continue;
+                fasm_site = "RAMB18_Y" + std::to_string(ord);
+            }
+            std::string gate = sanitise(tile + "_" + fasm_site);
+            for (const auto &dp : data_outs(is36))
+                for (int b = 0; b < dp.second; b++) {
+                    std::string suffix =
+                        std::string(":") + dp.first + "[" + std::to_string(b) + "]";
+                    out.mem[gate + suffix] = pv.first + suffix;
+                }
+        }
+    }
+
+    // The clock manager.  Only its LOCKED pin is paired, and only because it
+    // is the one Boolean thing about an MMCM; see the note in src/lvs/cone.cpp
+    // for what that does and does not establish.
+    for (const auto &pv : place.members()) {
+        std::string bel = pv.second.get("bel").asString();
+        if (bel != "MMCME2_ADV" && bel != "PLLE2_ADV") continue;
+        std::string gate = sanitise(pv.second.get("tile").asString() + "_MMCME2_ADV");
+        out.mem[gate + ":LOCKED[0]"] = pv.first + ":LOCKED[0]";
+    }
+
+    // The hard-block census.  Every block the placement put somewhere, with
+    // the name the tile model would give it if it models that kind at all.
+    // Nothing here compares behaviour -- a hard block has no cones to compare
+    // -- but a block the synthesis asked for and the bitstream does not
+    // configure is a real fault that register matching cannot see.
+    {
+        // The pins a DDR cut turns into free variables -- see OPAQUE_OUT
+        // in cone.cpp, which must cut exactly these.
+        static const std::vector<const char *> kIddrOuts = {"Q1", "Q2"};
+        static const std::vector<const char *> kOddrOuts = {"Q"};
+        static const std::set<std::string> kHardBels = {
+            "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
+            "BUFGCTRL", "BUFR",     "BUFIO",    "IBUFDS_GTE2",   "GTXE2_CHANNEL",
+            "GTXE2_COMMON", "GTPE2_CHANNEL", "GTPE2_COMMON", "IDELAYCTRL",
+            // The DDR registers in an I/O site.  The tile model cuts these at
+            // their boundary, so they need the same correspondence a block RAM
+            // gets: without it the two sides carry the same primitive under
+            // different names and the cuts cannot cancel.
+            "IDDR", "ODDR",
+        };
+        // Enumerated from the SYNTHESIS, not from the placement.  The
+        // placement is written at the end of place-and-route, so a cell that
+        // was dropped along the way is simply not in it -- which is precisely
+        // the case worth catching, and a census built from the placement
+        // cannot see it by construction.
+        for (const auto &cv : mod->get("cells").members()) {
+            std::string bel = cv.second.get("type").asString();
+            if (!kHardBels.count(bel)) continue;
+            RegMap::HardBlock hb;
+            hb.type = bel;
+            const json::Value &pv2 = place.get(cv.first);
+            if (pv2.isNull()) {
+                // In the synthesis, nowhere in the placement: it did not
+                // survive packing.
+                hb.site = "";
+                out.hard[cv.first] = hb;
+                continue;
+            }
+            hb.site = pv2.get("site").asString();
+            std::string tile = pv2.get("tile").asString();
+            // Only the kinds the tile model actually emits get a gate name; the
+            // rest are reported as unmodelled, which is the honest answer.
+            if (bel == "RAMB18E1" || bel == "RAMB36E1") {
+                const json::Value &tv = grid.get(tile);
+                std::string fasm_site = bel == "RAMB36E1" ? "RAMB36_Y0" : "";
+                if (fasm_site.empty() && !tv.isNull()) {
+                    std::vector<std::pair<int, std::string>> halves;
+                    for (const auto &sv : tv.get("sites").members()) {
+                        if (sv.first.rfind("RAMB18_", 0) != 0) continue;
+                        auto y = sv.first.rfind('Y');
+                        if (y != std::string::npos)
+                            halves.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                    }
+                    std::sort(halves.begin(), halves.end());
+                    for (size_t i = 0; i < halves.size(); i++)
+                        if (halves[i].second == hb.site) fasm_site = "RAMB18_Y" + std::to_string(i);
+                }
+                if (!fasm_site.empty()) hb.gate_name = sanitise(tile + "_" + fasm_site);
+            } else if (bel == "MMCME2_ADV" || bel == "PLLE2_ADV") {
+                hb.gate_name = sanitise(tile + "_MMCME2_ADV");
+            } else if (bel == "IDDR" || bel == "ODDR") {
+                // The placement names the site as the device does,
+                // ILOGIC_X0Y11; the FASM and the tile model name it by its
+                // position within the tile, ILOGIC_Y1.  Enumerate the tile's
+                // sites of that kind and index them, exactly as the RAMB18
+                // halves above are, rather than parsing the Y and hoping.
+                const char *pfx = bel == "IDDR" ? "ILOGIC_" : "OLOGIC_";
+                const json::Value &tv = grid.get(tile);
+                std::string fasm_site;
+                if (!tv.isNull()) {
+                    std::vector<std::pair<int, std::string>> at;
+                    for (const auto &sv : tv.get("sites").members()) {
+                        if (sv.first.rfind(pfx, 0) != 0) continue;
+                        auto y = sv.first.rfind('Y');
+                        if (y != std::string::npos)
+                            at.push_back({atoi(sv.first.c_str() + y + 1), sv.first});
+                    }
+                    std::sort(at.begin(), at.end());
+                    // ...and then INVERT the index.  The FASM name is not the
+                    // position in the tile, it is its complement: nextpnr's
+                    // write_iol_config spells it `1 - siteloc.y`, and the
+                    // bitstreams agree -- in LIOI_TBYTESRC_X82Y8 the SD command
+                    // pad sits at the lower site, ILOGIC_X0Y7, and both Vivado
+                    // and nextpnr write its IDDR to ILOGIC_Y1.  Indexing
+                    // straight names the OTHER site, which for a tile with one
+                    // half in use reads as a hard block missing from the
+                    // extraction, and for a tile with both in use silently
+                    // pairs each cell with its neighbour.
+                    //
+                    // A _SING_ tile holds one half, and which one it is depends
+                    // on where the tile sits relative to its HCLK row rather
+                    // than on anything here.  Rather than guess, leave it
+                    // unnamed: an unmodelled block is reported as such, and a
+                    // wrong pairing is not.
+                    if (at.size() == 2)
+                        for (size_t i = 0; i < at.size(); i++)
+                            if (at[i].second == hb.site)
+                                fasm_site = std::string(pfx) + "Y" + std::to_string(1 - i);
+                }
+                // An OLOGIC holds two registers and the synthesis spends a
+                // cell on each: OUTFF on the data path, TFF on the tristate.
+                // They share a site, so the site name alone collides -- and a
+                // collision here is silent, two cells claiming one gate.  The
+                // placement names the bel; use it.
+                if (!fasm_site.empty()) {
+                    std::string bel_name = pv2.get("bel").asString();
+                    if (bel == "ODDR" && bel_name == "TFF") fasm_site += "_TFF";
+                    hb.gate_name = sanitise(tile + "_" + fasm_site);
+                    // Naming the pair is not enough: the cut has to be joined
+                    // too, the way a block RAM's data outputs are, or each
+                    // side invents its own free variable for the same pin and
+                    // everything the pad feeds differs on the strength of the
+                    // name alone.
+                    for (const char *pin : (bel == "IDDR" ? kIddrOuts : kOddrOuts))
+                        out.mem[hb.gate_name + ":" + pin + "[0]"] =
+                            cv.first + ":" + pin + "[0]";
+                }
+            }
+            out.hard[cv.first] = hb;
+        }
+    }
+
     for (const auto &pv : place.members()) {
         if (pv.second.get("type").asString() != "SLICE_FFX")
             continue;
@@ -146,6 +428,10 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             continue;
         }
         out.net[tile + "/" + wire->second] = lb->second;
+        {
+            auto a = alt_label.find(q[0].asInt());
+            if (a != alt_label.end()) out.alt[tile + "/" + wire->second] = a->second;
+        }
         out.mapped++;
     }
     return out;

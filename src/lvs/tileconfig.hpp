@@ -30,6 +30,11 @@ enum class FF5Src { O5, BypassX };
 // What the column's xMUX output carries.
 enum class OutMux { None, O6, O5, Xor, Q5, Carry, F7, F8, MC31 };
 
+// Where a memory column's write data comes from.  The DI1 mux is per column
+// and its choices are the slice's own DI pins; a column with no DI1MUX feature
+// takes the shared DI pin.
+enum class Di1Src { DI, OwnI, Chain };
+
 // Where the slice's carry chain starts.  Established from
 // 017-clb-precyinit: one feature per value, 400 cases, no overlap.
 enum class PreCyInit { None, Zero, One, AX, CIN };
@@ -38,6 +43,7 @@ const char *to_string(FFSrc s);
 const char *to_string(FF5Src s);
 const char *to_string(OutMux s);
 const char *to_string(PreCyInit s);
+const char *to_string(Di1Src s);
 
 struct ColumnConfig
 {
@@ -62,6 +68,15 @@ struct ColumnConfig
     // cases, present <-> clb_NCY0_O5, absent <-> clb_NCY0_MX.
     bool carry_used = false;
     bool cy0_o5 = false;
+
+    // Distributed RAM.  ram makes this column's LUT storage writable; small
+    // splits it into two 32-deep halves.  Established from 018-clb-ram and
+    // 019-clb-ndi1mux.  A column with ram set reads exactly as it did before --
+    // the read path IS the LUT read -- so the only new behaviour is the write
+    // port, which is why the model can express it without a second cell.
+    bool ram = false;
+    bool ram_small = false;
+    Di1Src di1 = Di1Src::DI;
 };
 
 struct SliceConfig
@@ -69,6 +84,10 @@ struct SliceConfig
     std::string tile, tile_type, site;   // e.g. CLBLM_R_X31Y135, CLBLM_R, SLICEM_X0
     bool ffsync = false, clkinv = false, srusedmux = false, ceusedmux = false;
     PreCyInit precyinit = PreCyInit::None;
+    // Memory write control, shared by every column of the slice.
+    bool we_from_ce = false;   // WEMUX.CE: the write enable is the CE pin, not WE
+    bool wa7used = false;      // the write address extends past 6 bits...
+    bool wa8used = false;      // ...and past 7
     std::map<char, ColumnConfig> columns;
     std::vector<std::string> unhandled;  // features this decoder does not model
 };
@@ -94,7 +113,24 @@ struct IoLogicConfig
     // seen so far inverts here; an ILOGIC that does would fail its proof,
     // which is the right way to find out rather than the wrong default.
     bool d_inverted = false;
+
+    // A DDR register in the site, rather than a wire through it.  These are
+    // cut at their boundary and instantiated as the primitive, exactly as a
+    // block RAM is: what has to be right is which net reaches which pin, and
+    // the synthesis side is cut on the same primitive with the same port
+    // names, so the two cuts cancel.  Modelling the two edges instead would
+    // put a negedge register into a proof that has no notion of one.
+    bool is_iddr = false;                // ILOGIC: IDDR.IN_USE
+    bool is_oddr = false;                // OLOGIC: OSERDES.DATA_RATE_OQ.DDR
+    bool serdes_wide = false;            // ...but a SERDES, not a plain DDR
+    bool tddr_in_use = false;            // OLOGIC: ODDR_TDDR.IN_USE, the T register
+
     std::vector<std::string> unhandled;  // anything implying more than a wire
+
+    // True when the site holds a DDR register this model can cut at its
+    // boundary.  A wide SERDES is not that: it has no single primitive with a
+    // matching boundary on the synthesis side, so it stays unmodelled.
+    bool is_ddr_block() const { return (is_iddr || is_oddr) && !serdes_wide && unhandled.empty(); }
 
     // True when this site is a plain connection and nothing more.
     bool is_bypass() const
@@ -105,6 +141,9 @@ struct IoLogicConfig
         // That is the whole of what makes IDELAYE2 checkable here, and the
         // whole of what this check does not cover.
         if (is_delay) return true;
+        // A DDR site is not a bypass and never claims to be; it is emitted as
+        // the primitive instead of being dropped.
+        if (is_iddr || is_oddr) return false;
         return is_output ? (oq_used && omux == "D1") : !d_inverted;
     }
 };

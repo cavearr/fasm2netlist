@@ -1,0 +1,675 @@
+{
+ "pips": {
+  "BRAM_FIFO36_ADDRARDADDRU0.BRAM_FIFO36_ADDRARDADDRL0": {
+   "dst_wire": "BRAM_FIFO36_ADDRARDADDRU0",
+   "src_wire": "BRAM_FIFO36_ADDRARDADDRL0"
+  },
+  "BRAM_FIFO36_ADDRARDADDRU1.BRAM_FIFO36_ADDRARDADDRL1": {
+   "dst_wire": "BRAM_FIFO36_ADDRARDADDRU1",
+   "src_wire": "BRAM_FIFO36_ADDRARDADDRL1"
+  },
+  "BRAM_FIFO36_ADDRARDADDRU2.BRAM_FIFO36_ADDRARDADDRL2": {
+   "dst_wire": "BRAM_FIFO36_ADDRARDADDRU2",
+   "src_wire": "BRAM_FIFO36_ADDRARDADDRL2"
+  },
+  "BRAM_FIFO36_ADDRARDADDRU3.BRAM_FIFO36_ADDRARDADDRL3": {
+   "dst_wire": "BRAM_FIFO36_ADDRARDADDRU3",
+   "src_wire": "BRAM_FIFO36_ADDRARDADDRL3"
+  },
+  "BRAM_FIFO36_ADDRBWRADDRU0.BRAM_FIFO36_ADDRBWRADDRL0": {
+   "dst_wire": "BRAM_FIFO36_ADDRBWRADDRU0",
+   "src_wire": "BRAM_FIFO36_ADDRBWRADDRL0"
+  },
+  "BRAM_FIFO36_ADDRBWRADDRU1.BRAM_FIFO36_ADDRBWRADDRL1": {
+   "dst_wire": "BRAM_FIFO36_ADDRBWRADDRU1",
+   "src_wire": "BRAM_FIFO36_ADDRBWRADDRL1"
+  },
+  "BRAM_FIFO36_ADDRBWRADDRU2.BRAM_FIFO36_ADDRBWRADDRL2": {
+   "dst_wire": "BRAM_FIFO36_ADDRBWRADDRU2",
+   "src_wire": "BRAM_FIFO36_ADDRBWRADDRL2"
+  },
+  "BRAM_FIFO36_ADDRBWRADDRU3.BRAM_FIFO36_ADDRBWRADDRL3": {
+   "dst_wire": "BRAM_FIFO36_ADDRBWRADDRU3",
+   "src_wire": "BRAM_FIFO36_ADDRBWRADDRL3"
+  },
+  "BRAM_FIFO36_CLKARDCLKU.BRAM_FIFO36_CLKARDCLKL": {
+   "dst_wire": "BRAM_FIFO36_CLKARDCLKU",
+   "src_wire": "BRAM_FIFO36_CLKARDCLKL"
+  },
+  "BRAM_FIFO36_CLKBWRCLKU.BRAM_FIFO36_CLKBWRCLKL": {
+   "dst_wire": "BRAM_FIFO36_CLKBWRCLKU",
+   "src_wire": "BRAM_FIFO36_CLKBWRCLKL"
+  },
+  "BRAM_FIFO36_DIADI0.EXT0": {
+   "dst_wire": "BRAM_FIFO36_DIADI0",
+   "src_wire": "EXT0"
+  },
+  "BRAM_FIFO36_ENARDENU.BRAM_FIFO36_ENARDENL": {
+   "dst_wire": "BRAM_FIFO36_ENARDENU",
+   "src_wire": "BRAM_FIFO36_ENARDENL"
+  },
+  "BRAM_FIFO36_ENBWRENU.BRAM_FIFO36_ENBWRENL": {
+   "dst_wire": "BRAM_FIFO36_ENBWRENU",
+   "src_wire": "BRAM_FIFO36_ENBWRENL"
+  },
+  "BRAM_FIFO36_REGCEAREGCEU.BRAM_FIFO36_REGCEAREGCEL": {
+   "dst_wire": "BRAM_FIFO36_REGCEAREGCEU",
+   "src_wire": "BRAM_FIFO36_REGCEAREGCEL"
+  },
+  "BRAM_FIFO36_REGCEBU.BRAM_FIFO36_REGCEBL": {
+   "dst_wire": "BRAM_FIFO36_REGCEBU",
+   "src_wire": "BRAM_FIFO36_REGCEBL"
+  },
+  "BRAM_FIFO36_REGCLKARDRCLKU.BRAM_FIFO36_REGCLKARDRCLKL": {
+   "dst_wire": "BRAM_FIFO36_REGCLKARDRCLKU",
+   "src_wire": "BRAM_FIFO36_REGCLKARDRCLKL"
+  },
+  "BRAM_FIFO36_REGCLKBU.BRAM_FIFO36_REGCLKBL": {
+   "dst_wire": "BRAM_FIFO36_REGCLKBU",
+   "src_wire": "BRAM_FIFO36_REGCLKBL"
+  },
+  "BRAM_FIFO36_RSTRAMARSTRAMU.BRAM_FIFO36_RSTRAMARSTRAMLRST": {
+   "dst_wire": "BRAM_FIFO36_RSTRAMARSTRAMU",
+   "src_wire": "BRAM_FIFO36_RSTRAMARSTRAMLRST"
+  },
+  "BRAM_FIFO36_RSTRAMBU.BRAM_FIFO36_RSTRAMBL": {
+   "dst_wire": "BRAM_FIFO36_RSTRAMBU",
+   "src_wire": "BRAM_FIFO36_RSTRAMBL"
+  },
+  "BRAM_FIFO36_RSTREGARSTREGU.BRAM_FIFO36_RSTREGARSTREGL": {
+   "dst_wire": "BRAM_FIFO36_RSTREGARSTREGU",
+   "src_wire": "BRAM_FIFO36_RSTREGARSTREGL"
+  },
+  "BRAM_FIFO36_RSTREGBU.BRAM_FIFO36_RSTREGBL": {
+   "dst_wire": "BRAM_FIFO36_RSTREGBU",
+   "src_wire": "BRAM_FIFO36_RSTREGBL"
+  },
+  "BRAM_FIFO36_WEAU0.BRAM_FIFO36_WEAL0": {
+   "dst_wire": "BRAM_FIFO36_WEAU0",
+   "src_wire": "BRAM_FIFO36_WEAL0"
+  },
+  "BRAM_FIFO36_WEAU1.BRAM_FIFO36_WEAL1": {
+   "dst_wire": "BRAM_FIFO36_WEAU1",
+   "src_wire": "BRAM_FIFO36_WEAL1"
+  }
+ },
+ "sites": [
+  {
+   "site_pins": {
+    "ADDRARDADDR0": {
+     "wire": "BRAM_FIFO18_ADDRARDADDR0"
+    },
+    "ADDRARDADDR1": {
+     "wire": "BRAM_FIFO18_ADDRARDADDR1"
+    },
+    "ADDRARDADDR2": {
+     "wire": "BRAM_FIFO18_ADDRARDADDR2"
+    },
+    "ADDRARDADDR3": {
+     "wire": "BRAM_FIFO18_ADDRARDADDR3"
+    },
+    "ADDRBWRADDR0": {
+     "wire": "BRAM_FIFO18_ADDRBWRADDR0"
+    },
+    "ADDRBWRADDR1": {
+     "wire": "BRAM_FIFO18_ADDRBWRADDR1"
+    },
+    "ADDRBWRADDR2": {
+     "wire": "BRAM_FIFO18_ADDRBWRADDR2"
+    },
+    "ADDRBWRADDR3": {
+     "wire": "BRAM_FIFO18_ADDRBWRADDR3"
+    },
+    "CLKARDCLK": {
+     "wire": "BRAM_FIFO18_CLKARDCLK"
+    },
+    "CLKBWRCLK": {
+     "wire": "BRAM_FIFO18_CLKBWRCLK"
+    },
+    "DIADI0": {
+     "wire": "BRAM_FIFO18_DIADI0"
+    },
+    "DIADI1": {
+     "wire": "BRAM_FIFO18_DIADI1"
+    },
+    "DIADI2": {
+     "wire": "BRAM_FIFO18_DIADI2"
+    },
+    "DIADI3": {
+     "wire": "BRAM_FIFO18_DIADI3"
+    },
+    "DIBDI0": {
+     "wire": "BRAM_FIFO18_DIBDI0"
+    },
+    "DIBDI1": {
+     "wire": "BRAM_FIFO18_DIBDI1"
+    },
+    "DIBDI2": {
+     "wire": "BRAM_FIFO18_DIBDI2"
+    },
+    "DIBDI3": {
+     "wire": "BRAM_FIFO18_DIBDI3"
+    },
+    "DOADO0": {
+     "wire": "BRAM_FIFO18_DOADO0"
+    },
+    "DOADO1": {
+     "wire": "BRAM_FIFO18_DOADO1"
+    },
+    "DOADO2": {
+     "wire": "BRAM_FIFO18_DOADO2"
+    },
+    "DOADO3": {
+     "wire": "BRAM_FIFO18_DOADO3"
+    },
+    "DOBDO0": {
+     "wire": "BRAM_FIFO18_DOBDO0"
+    },
+    "DOBDO1": {
+     "wire": "BRAM_FIFO18_DOBDO1"
+    },
+    "DOBDO2": {
+     "wire": "BRAM_FIFO18_DOBDO2"
+    },
+    "DOBDO3": {
+     "wire": "BRAM_FIFO18_DOBDO3"
+    },
+    "ENARDEN": {
+     "wire": "BRAM_FIFO18_ENARDEN"
+    },
+    "ENBWREN": {
+     "wire": "BRAM_FIFO18_ENBWREN"
+    },
+    "REGCEAREGCE": {
+     "wire": "BRAM_FIFO18_REGCEAREGCE"
+    },
+    "REGCEB": {
+     "wire": "BRAM_FIFO18_REGCEB"
+    },
+    "REGCLKARDRCLK": {
+     "wire": "BRAM_FIFO18_REGCLKARDRCLK"
+    },
+    "REGCLKB": {
+     "wire": "BRAM_FIFO18_REGCLKB"
+    },
+    "RSTRAMARSTRAM": {
+     "wire": "BRAM_FIFO18_RSTRAMARSTRAM"
+    },
+    "RSTRAMB": {
+     "wire": "BRAM_FIFO18_RSTRAMB"
+    },
+    "RSTREGARSTREG": {
+     "wire": "BRAM_FIFO18_RSTREGARSTREG"
+    },
+    "RSTREGB": {
+     "wire": "BRAM_FIFO18_RSTREGB"
+    },
+    "WEA0": {
+     "wire": "BRAM_FIFO18_WEA0"
+    },
+    "WEA1": {
+     "wire": "BRAM_FIFO18_WEA1"
+    },
+    "WEBWE0": {
+     "wire": "BRAM_FIFO18_WEBWE0"
+    },
+    "WEBWE1": {
+     "wire": "BRAM_FIFO18_WEBWE1"
+    },
+    "WEBWE2": {
+     "wire": "BRAM_FIFO18_WEBWE2"
+    },
+    "WEBWE3": {
+     "wire": "BRAM_FIFO18_WEBWE3"
+    }
+   },
+   "type": "FIFO18E1",
+   "x_coord": 0,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "ADDRARDADDRL0": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRL0"
+    },
+    "ADDRARDADDRL1": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRL1"
+    },
+    "ADDRARDADDRL2": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRL2"
+    },
+    "ADDRARDADDRL3": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRL3"
+    },
+    "ADDRARDADDRU0": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRU0"
+    },
+    "ADDRARDADDRU1": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRU1"
+    },
+    "ADDRARDADDRU2": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRU2"
+    },
+    "ADDRARDADDRU3": {
+     "wire": "BRAM_FIFO36_ADDRARDADDRU3"
+    },
+    "ADDRBWRADDRL0": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRL0"
+    },
+    "ADDRBWRADDRL1": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRL1"
+    },
+    "ADDRBWRADDRL2": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRL2"
+    },
+    "ADDRBWRADDRL3": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRL3"
+    },
+    "ADDRBWRADDRU0": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRU0"
+    },
+    "ADDRBWRADDRU1": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRU1"
+    },
+    "ADDRBWRADDRU2": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRU2"
+    },
+    "ADDRBWRADDRU3": {
+     "wire": "BRAM_FIFO36_ADDRBWRADDRU3"
+    },
+    "CASCADEINA": {
+     "wire": "BRAM_FIFO36_CASCADEINA"
+    },
+    "CASCADEOUTA": {
+     "wire": "BRAM_FIFO36_CASCADEOUTA"
+    },
+    "CLKARDCLKL": {
+     "wire": "BRAM_FIFO36_CLKARDCLKL"
+    },
+    "CLKARDCLKU": {
+     "wire": "BRAM_FIFO36_CLKARDCLKU"
+    },
+    "CLKBWRCLKL": {
+     "wire": "BRAM_FIFO36_CLKBWRCLKL"
+    },
+    "CLKBWRCLKU": {
+     "wire": "BRAM_FIFO36_CLKBWRCLKU"
+    },
+    "DIADI0": {
+     "wire": "BRAM_FIFO36_DIADI0"
+    },
+    "DIADI1": {
+     "wire": "BRAM_FIFO36_DIADI1"
+    },
+    "DIADI2": {
+     "wire": "BRAM_FIFO36_DIADI2"
+    },
+    "DIADI3": {
+     "wire": "BRAM_FIFO36_DIADI3"
+    },
+    "DOADO0": {
+     "wire": "BRAM_FIFO36_DOADO0"
+    },
+    "DOADO1": {
+     "wire": "BRAM_FIFO36_DOADO1"
+    },
+    "DOADO2": {
+     "wire": "BRAM_FIFO36_DOADO2"
+    },
+    "DOADO3": {
+     "wire": "BRAM_FIFO36_DOADO3"
+    },
+    "ENARDENL": {
+     "wire": "BRAM_FIFO36_ENARDENL"
+    },
+    "ENARDENU": {
+     "wire": "BRAM_FIFO36_ENARDENU"
+    },
+    "ENBWRENL": {
+     "wire": "BRAM_FIFO36_ENBWRENL"
+    },
+    "ENBWRENU": {
+     "wire": "BRAM_FIFO36_ENBWRENU"
+    },
+    "REGCEAREGCEL": {
+     "wire": "BRAM_FIFO36_REGCEAREGCEL"
+    },
+    "REGCEAREGCEU": {
+     "wire": "BRAM_FIFO36_REGCEAREGCEU"
+    },
+    "REGCEBL": {
+     "wire": "BRAM_FIFO36_REGCEBL"
+    },
+    "REGCEBU": {
+     "wire": "BRAM_FIFO36_REGCEBU"
+    },
+    "REGCLKARDRCLKL": {
+     "wire": "BRAM_FIFO36_REGCLKARDRCLKL"
+    },
+    "REGCLKARDRCLKU": {
+     "wire": "BRAM_FIFO36_REGCLKARDRCLKU"
+    },
+    "REGCLKBL": {
+     "wire": "BRAM_FIFO36_REGCLKBL"
+    },
+    "REGCLKBU": {
+     "wire": "BRAM_FIFO36_REGCLKBU"
+    },
+    "RSTRAMARSTRAMLRST": {
+     "wire": "BRAM_FIFO36_RSTRAMARSTRAMLRST"
+    },
+    "RSTRAMARSTRAMU": {
+     "wire": "BRAM_FIFO36_RSTRAMARSTRAMU"
+    },
+    "RSTRAMBL": {
+     "wire": "BRAM_FIFO36_RSTRAMBL"
+    },
+    "RSTRAMBU": {
+     "wire": "BRAM_FIFO36_RSTRAMBU"
+    },
+    "RSTREGARSTREGL": {
+     "wire": "BRAM_FIFO36_RSTREGARSTREGL"
+    },
+    "RSTREGARSTREGU": {
+     "wire": "BRAM_FIFO36_RSTREGARSTREGU"
+    },
+    "RSTREGBL": {
+     "wire": "BRAM_FIFO36_RSTREGBL"
+    },
+    "RSTREGBU": {
+     "wire": "BRAM_FIFO36_RSTREGBU"
+    },
+    "WEAL0": {
+     "wire": "BRAM_FIFO36_WEAL0"
+    },
+    "WEAL1": {
+     "wire": "BRAM_FIFO36_WEAL1"
+    },
+    "WEAU0": {
+     "wire": "BRAM_FIFO36_WEAU0"
+    },
+    "WEAU1": {
+     "wire": "BRAM_FIFO36_WEAU1"
+    }
+   },
+   "type": "RAMBFIFO36E1",
+   "x_coord": 1,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "ADDRARDADDR0": {
+     "wire": "BRAM_RAMB18_ADDRARDADDR0"
+    },
+    "ADDRARDADDR1": {
+     "wire": "BRAM_RAMB18_ADDRARDADDR1"
+    },
+    "ADDRARDADDR2": {
+     "wire": "BRAM_RAMB18_ADDRARDADDR2"
+    },
+    "ADDRARDADDR3": {
+     "wire": "BRAM_RAMB18_ADDRARDADDR3"
+    },
+    "ADDRBWRADDR0": {
+     "wire": "BRAM_RAMB18_ADDRBWRADDR0"
+    },
+    "ADDRBWRADDR1": {
+     "wire": "BRAM_RAMB18_ADDRBWRADDR1"
+    },
+    "ADDRBWRADDR2": {
+     "wire": "BRAM_RAMB18_ADDRBWRADDR2"
+    },
+    "ADDRBWRADDR3": {
+     "wire": "BRAM_RAMB18_ADDRBWRADDR3"
+    },
+    "CLKARDCLK": {
+     "wire": "BRAM_RAMB18_CLKARDCLK"
+    },
+    "CLKBWRCLK": {
+     "wire": "BRAM_RAMB18_CLKBWRCLK"
+    },
+    "DIADI0": {
+     "wire": "BRAM_RAMB18_DIADI0"
+    },
+    "DIADI1": {
+     "wire": "BRAM_RAMB18_DIADI1"
+    },
+    "DIADI2": {
+     "wire": "BRAM_RAMB18_DIADI2"
+    },
+    "DIADI3": {
+     "wire": "BRAM_RAMB18_DIADI3"
+    },
+    "DIBDI0": {
+     "wire": "BRAM_RAMB18_DIBDI0"
+    },
+    "DIBDI1": {
+     "wire": "BRAM_RAMB18_DIBDI1"
+    },
+    "DIBDI2": {
+     "wire": "BRAM_RAMB18_DIBDI2"
+    },
+    "DIBDI3": {
+     "wire": "BRAM_RAMB18_DIBDI3"
+    },
+    "DOADO0": {
+     "wire": "BRAM_RAMB18_DOADO0"
+    },
+    "DOADO1": {
+     "wire": "BRAM_RAMB18_DOADO1"
+    },
+    "DOADO2": {
+     "wire": "BRAM_RAMB18_DOADO2"
+    },
+    "DOADO3": {
+     "wire": "BRAM_RAMB18_DOADO3"
+    },
+    "DOBDO0": {
+     "wire": "BRAM_RAMB18_DOBDO0"
+    },
+    "DOBDO1": {
+     "wire": "BRAM_RAMB18_DOBDO1"
+    },
+    "DOBDO2": {
+     "wire": "BRAM_RAMB18_DOBDO2"
+    },
+    "DOBDO3": {
+     "wire": "BRAM_RAMB18_DOBDO3"
+    },
+    "ENARDEN": {
+     "wire": "BRAM_RAMB18_ENARDEN"
+    },
+    "ENBWREN": {
+     "wire": "BRAM_RAMB18_ENBWREN"
+    },
+    "REGCEAREGCE": {
+     "wire": "BRAM_RAMB18_REGCEAREGCE"
+    },
+    "REGCEB": {
+     "wire": "BRAM_RAMB18_REGCEB"
+    },
+    "REGCLKARDRCLK": {
+     "wire": "BRAM_RAMB18_REGCLKARDRCLK"
+    },
+    "REGCLKB": {
+     "wire": "BRAM_RAMB18_REGCLKB"
+    },
+    "RSTRAMARSTRAM": {
+     "wire": "BRAM_RAMB18_RSTRAMARSTRAM"
+    },
+    "RSTRAMB": {
+     "wire": "BRAM_RAMB18_RSTRAMB"
+    },
+    "RSTREGARSTREG": {
+     "wire": "BRAM_RAMB18_RSTREGARSTREG"
+    },
+    "RSTREGB": {
+     "wire": "BRAM_RAMB18_RSTREGB"
+    },
+    "WEA0": {
+     "wire": "BRAM_RAMB18_WEA0"
+    },
+    "WEA1": {
+     "wire": "BRAM_RAMB18_WEA1"
+    },
+    "WEBWE0": {
+     "wire": "BRAM_RAMB18_WEBWE0"
+    },
+    "WEBWE1": {
+     "wire": "BRAM_RAMB18_WEBWE1"
+    },
+    "WEBWE2": {
+     "wire": "BRAM_RAMB18_WEBWE2"
+    },
+    "WEBWE3": {
+     "wire": "BRAM_RAMB18_WEBWE3"
+    }
+   },
+   "type": "RAMB18E1",
+   "x_coord": 2,
+   "y_coord": 0
+  }
+ ],
+ "tile_type": "TESTBRAM",
+ "wires": {
+  "BRAM_FIFO18_ADDRARDADDR0": null,
+  "BRAM_FIFO18_ADDRARDADDR1": null,
+  "BRAM_FIFO18_ADDRARDADDR2": null,
+  "BRAM_FIFO18_ADDRARDADDR3": null,
+  "BRAM_FIFO18_ADDRBWRADDR0": null,
+  "BRAM_FIFO18_ADDRBWRADDR1": null,
+  "BRAM_FIFO18_ADDRBWRADDR2": null,
+  "BRAM_FIFO18_ADDRBWRADDR3": null,
+  "BRAM_FIFO18_CLKARDCLK": null,
+  "BRAM_FIFO18_CLKBWRCLK": null,
+  "BRAM_FIFO18_DIADI0": null,
+  "BRAM_FIFO18_DIADI1": null,
+  "BRAM_FIFO18_DIADI2": null,
+  "BRAM_FIFO18_DIADI3": null,
+  "BRAM_FIFO18_DIBDI0": null,
+  "BRAM_FIFO18_DIBDI1": null,
+  "BRAM_FIFO18_DIBDI2": null,
+  "BRAM_FIFO18_DIBDI3": null,
+  "BRAM_FIFO18_DOADO0": null,
+  "BRAM_FIFO18_DOADO1": null,
+  "BRAM_FIFO18_DOADO2": null,
+  "BRAM_FIFO18_DOADO3": null,
+  "BRAM_FIFO18_DOBDO0": null,
+  "BRAM_FIFO18_DOBDO1": null,
+  "BRAM_FIFO18_DOBDO2": null,
+  "BRAM_FIFO18_DOBDO3": null,
+  "BRAM_FIFO18_ENARDEN": null,
+  "BRAM_FIFO18_ENBWREN": null,
+  "BRAM_FIFO18_REGCEAREGCE": null,
+  "BRAM_FIFO18_REGCEB": null,
+  "BRAM_FIFO18_REGCLKARDRCLK": null,
+  "BRAM_FIFO18_REGCLKB": null,
+  "BRAM_FIFO18_RSTRAMARSTRAM": null,
+  "BRAM_FIFO18_RSTRAMB": null,
+  "BRAM_FIFO18_RSTREGARSTREG": null,
+  "BRAM_FIFO18_RSTREGB": null,
+  "BRAM_FIFO18_WEA0": null,
+  "BRAM_FIFO18_WEA1": null,
+  "BRAM_FIFO18_WEBWE0": null,
+  "BRAM_FIFO18_WEBWE1": null,
+  "BRAM_FIFO18_WEBWE2": null,
+  "BRAM_FIFO18_WEBWE3": null,
+  "BRAM_FIFO36_ADDRARDADDRL0": null,
+  "BRAM_FIFO36_ADDRARDADDRL1": null,
+  "BRAM_FIFO36_ADDRARDADDRL2": null,
+  "BRAM_FIFO36_ADDRARDADDRL3": null,
+  "BRAM_FIFO36_ADDRARDADDRU0": null,
+  "BRAM_FIFO36_ADDRARDADDRU1": null,
+  "BRAM_FIFO36_ADDRARDADDRU2": null,
+  "BRAM_FIFO36_ADDRARDADDRU3": null,
+  "BRAM_FIFO36_ADDRBWRADDRL0": null,
+  "BRAM_FIFO36_ADDRBWRADDRL1": null,
+  "BRAM_FIFO36_ADDRBWRADDRL2": null,
+  "BRAM_FIFO36_ADDRBWRADDRL3": null,
+  "BRAM_FIFO36_ADDRBWRADDRU0": null,
+  "BRAM_FIFO36_ADDRBWRADDRU1": null,
+  "BRAM_FIFO36_ADDRBWRADDRU2": null,
+  "BRAM_FIFO36_ADDRBWRADDRU3": null,
+  "BRAM_FIFO36_CASCADEINA": null,
+  "BRAM_FIFO36_CASCADEOUTA": null,
+  "BRAM_FIFO36_CLKARDCLKL": null,
+  "BRAM_FIFO36_CLKARDCLKU": null,
+  "BRAM_FIFO36_CLKBWRCLKL": null,
+  "BRAM_FIFO36_CLKBWRCLKU": null,
+  "BRAM_FIFO36_DIADI0": null,
+  "BRAM_FIFO36_DIADI1": null,
+  "BRAM_FIFO36_DIADI2": null,
+  "BRAM_FIFO36_DIADI3": null,
+  "BRAM_FIFO36_DOADO0": null,
+  "BRAM_FIFO36_DOADO1": null,
+  "BRAM_FIFO36_DOADO2": null,
+  "BRAM_FIFO36_DOADO3": null,
+  "BRAM_FIFO36_ENARDENL": null,
+  "BRAM_FIFO36_ENARDENU": null,
+  "BRAM_FIFO36_ENBWRENL": null,
+  "BRAM_FIFO36_ENBWRENU": null,
+  "BRAM_FIFO36_REGCEAREGCEL": null,
+  "BRAM_FIFO36_REGCEAREGCEU": null,
+  "BRAM_FIFO36_REGCEBL": null,
+  "BRAM_FIFO36_REGCEBU": null,
+  "BRAM_FIFO36_REGCLKARDRCLKL": null,
+  "BRAM_FIFO36_REGCLKARDRCLKU": null,
+  "BRAM_FIFO36_REGCLKBL": null,
+  "BRAM_FIFO36_REGCLKBU": null,
+  "BRAM_FIFO36_RSTRAMARSTRAMLRST": null,
+  "BRAM_FIFO36_RSTRAMARSTRAMU": null,
+  "BRAM_FIFO36_RSTRAMBL": null,
+  "BRAM_FIFO36_RSTRAMBU": null,
+  "BRAM_FIFO36_RSTREGARSTREGL": null,
+  "BRAM_FIFO36_RSTREGARSTREGU": null,
+  "BRAM_FIFO36_RSTREGBL": null,
+  "BRAM_FIFO36_RSTREGBU": null,
+  "BRAM_FIFO36_WEAL0": null,
+  "BRAM_FIFO36_WEAL1": null,
+  "BRAM_FIFO36_WEAU0": null,
+  "BRAM_FIFO36_WEAU1": null,
+  "BRAM_RAMB18_ADDRARDADDR0": null,
+  "BRAM_RAMB18_ADDRARDADDR1": null,
+  "BRAM_RAMB18_ADDRARDADDR2": null,
+  "BRAM_RAMB18_ADDRARDADDR3": null,
+  "BRAM_RAMB18_ADDRBWRADDR0": null,
+  "BRAM_RAMB18_ADDRBWRADDR1": null,
+  "BRAM_RAMB18_ADDRBWRADDR2": null,
+  "BRAM_RAMB18_ADDRBWRADDR3": null,
+  "BRAM_RAMB18_CLKARDCLK": null,
+  "BRAM_RAMB18_CLKBWRCLK": null,
+  "BRAM_RAMB18_DIADI0": null,
+  "BRAM_RAMB18_DIADI1": null,
+  "BRAM_RAMB18_DIADI2": null,
+  "BRAM_RAMB18_DIADI3": null,
+  "BRAM_RAMB18_DIBDI0": null,
+  "BRAM_RAMB18_DIBDI1": null,
+  "BRAM_RAMB18_DIBDI2": null,
+  "BRAM_RAMB18_DIBDI3": null,
+  "BRAM_RAMB18_DOADO0": null,
+  "BRAM_RAMB18_DOADO1": null,
+  "BRAM_RAMB18_DOADO2": null,
+  "BRAM_RAMB18_DOADO3": null,
+  "BRAM_RAMB18_DOBDO0": null,
+  "BRAM_RAMB18_DOBDO1": null,
+  "BRAM_RAMB18_DOBDO2": null,
+  "BRAM_RAMB18_DOBDO3": null,
+  "BRAM_RAMB18_ENARDEN": null,
+  "BRAM_RAMB18_ENBWREN": null,
+  "BRAM_RAMB18_REGCEAREGCE": null,
+  "BRAM_RAMB18_REGCEB": null,
+  "BRAM_RAMB18_REGCLKARDRCLK": null,
+  "BRAM_RAMB18_REGCLKB": null,
+  "BRAM_RAMB18_RSTRAMARSTRAM": null,
+  "BRAM_RAMB18_RSTRAMB": null,
+  "BRAM_RAMB18_RSTREGARSTREG": null,
+  "BRAM_RAMB18_RSTREGB": null,
+  "BRAM_RAMB18_WEA0": null,
+  "BRAM_RAMB18_WEA1": null,
+  "BRAM_RAMB18_WEBWE0": null,
+  "BRAM_RAMB18_WEBWE1": null,
+  "BRAM_RAMB18_WEBWE2": null,
+  "BRAM_RAMB18_WEBWE3": null,
+  "EXT0": null
+ }
+}

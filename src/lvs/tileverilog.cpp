@@ -14,17 +14,26 @@
 //
 // BEST GUESSES, all of them in the model and none of them elsewhere:
 //   - O6 = INIT[{A6..A1}], O5 = the low half read with A6 low.
-//   - the main FF takes O6 / O5 / the X bypass; XOR, CY, MC31 and F7/F8 are
-//     NOT modelled and select a tied 0 (the instance reports it).
-//   - the xMUX carries O6, O5 or the 5FF's Q; the same four selects above are
-//     not modelled.  F7/F8 has no site feature at all, so it cannot be seen
-//     from here even in principle -- see tests/lvs/harness/README.md.
+//   - the main FF takes O6 / O5 / the X bypass / the slice's wide mux; XOR,
+//     CY and MC31 are NOT modelled and select a tied 0 (the instance reports
+//     it).
+//   - the xMUX carries O6, O5, the 5FF's Q or the wide mux; XOR, CY and MC31
+//     are not modelled.  F7/F8 has no site feature saying the mux EXISTS,
+//     only features saying a column reads one, so the tree is built wherever
+//     a column selects it, wired as nextpnr's own packer wires it.
 //   - CE defaults to 1 and SR to 0 unless CEUSEDMUX / SRUSEDMUX say otherwise.
-//   - carry, distributed RAM and SRL are absent: a slice using them still gets
-//     an instance, and its unmodelled features are listed on stderr.
+//   - carry and distributed RAM are modelled; SRL is not, and a slice using
+//     one still gets an instance with its unmodelled features listed on
+//     stderr.  Block RAM is not modelled either, but it is CUT: the block is
+//     instantiated with its pins wired and nothing inside, so a comparison
+//     can treat its reads as free variables and its inputs as obligations.
+//     lvs_equiv keeps its OWN column model in cone.cpp and must agree with
+//     this one; the two are kept honest by the examples, not by sharing code.
 #include "json.hpp"
 #include "lvs/regmap.hpp"
 #include "lvs/tileconfig.hpp"
+
+#include "bram_ports.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -184,6 +193,12 @@ int main(int argc, char **argv)
 
     // site pins per tile type, from tile_type_*.json
     std::map<std::string, std::vector<std::map<std::string, std::string>>> site_pins; // type -> per-site pin->wire
+    // ...and what FASM calls each of those sites, in the same order.  A tile
+    // type describes its sites positionally and by coordinate ("prefix"
+    // RAMB18, "y_coord" 0); FASM names them "RAMB18_Y0".  Knowing the FASM
+    // spelling is what lets a site's configuration be told apart from a PIP,
+    // since the two are written identically -- "<tile>.<a>.<b>" either way.
+    std::map<std::string, std::vector<std::string>> site_names;   // type -> per-site FASM name
     auto load_type = [&](const std::string &type) {
         if (site_pins.count(type)) return;
         std::string path = db + "/tile_type_" + type + ".json";
@@ -191,15 +206,50 @@ int main(int argc, char **argv)
         if (!probe) { site_pins[type] = {}; return; }
         json::Value tt = json::parse(readFile(path));
         std::vector<std::map<std::string, std::string>> per;
+        std::vector<std::string> names;
         for (const auto &s : tt.get("sites").items()) {
             std::map<std::string, std::string> m;
             for (const auto &pk : s.get("site_pins").members())
                 m[pk.first] = pk.second.get("wire").asString();
             per.push_back(m);
+            const json::Value &pre = s.get("prefix"), &yc = s.get("y_coord");
+            names.push_back(pre.isNull() || yc.isNull()
+                                ? std::string()
+                                : pre.asString() + "_Y" + std::to_string(yc.asInt()));
         }
         site_pins[type] = per;
+        site_names[type] = names;
     };
     for (const auto &t : used) if (tiles.count(t)) load_type(tiles[t].type);
+
+    // ---- pseudo-PIPs: the connections that carry no bits ------------------
+    // ppips_<type>.db lists hardwired paths.  `always` is permanently on and
+    // appears in no bitstream, so a net graph built only from FASM features is
+    // missing them -- which leaves, among others, every slice's X bypass
+    // undriven and sitting at the pull-up.  `default` is on unless the
+    // destination is driven by a real PIP, so it is applied only where nothing
+    // else drives it.  `hint` is documentation and is ignored.
+    std::map<std::string, std::vector<std::array<std::string, 3>>> ppips; // type -> (dst,src,kind)
+    auto load_ppips = [&](const std::string &type) {
+        if (ppips.count(type)) return;
+        std::string lower;
+        for (char c : type) lower.push_back(char(tolower(c)));
+        std::ifstream in(db + "/ppips_" + lower + ".db");
+        std::vector<std::array<std::string, 3>> v;
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream ls(line);
+            std::string feat, kind;
+            if (!(ls >> feat >> kind)) continue;
+            auto d1 = feat.find('.');
+            if (d1 == std::string::npos) continue;
+            auto d2 = feat.find('.', d1 + 1);
+            if (d2 == std::string::npos) continue;
+            v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
+        }
+        ppips[type] = v;
+    };
+    for (const auto &t : used) if (tiles.count(t)) load_ppips(tiles[t].type);
 
     // ---- nets: (tile,wire), joined across tile boundaries ---------------
     Dsu dsu;
@@ -213,13 +263,27 @@ int main(int argc, char **argv)
     // connectivity rather than a radius, so it closes the chain without
     // dragging in the rest of the die.
     std::set<std::string> known;
-    for (const auto &kv : dc.other_tiles)
+    // ...and which wires a real PIP drives, which is what a "default"
+    // pseudo-PIP has to defer to.  Collected here because this is already the
+    // pass that reads the features, and the pseudo-PIPs are now applied during
+    // growth rather than after it.
+    std::set<std::string> pip_driven;
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        const std::vector<std::string> *sn =
+            ti == tiles.end() ? nullptr : &site_names[ti->second.type];
         for (const auto &feat : kv.second) {
             auto dot = feat.find('.');
-            if (dot == std::string::npos || feat.find('.', dot + 1) != std::string::npos) continue;
+            if (dot == std::string::npos) continue;
+            // A site's configuration has the same shape as a PIP; taking it
+            // for one puts wires in the net graph that the tile does not have.
+            if (sn && std::find(sn->begin(), sn->end(), feat.substr(0, dot)) != sn->end()) continue;
+            if (feat.find('.', dot + 1) != std::string::npos) continue;
             known.insert(tw(kv.first, feat.substr(0, dot)));
             known.insert(tw(kv.first, feat.substr(dot + 1)));
+            pip_driven.insert(tw(kv.first, feat.substr(0, dot)));
         }
+    }
     for (const auto &kv : dc.slices) {
         auto ti = tiles.find(kv.second.tile);
         if (ti == tiles.end()) continue;
@@ -241,7 +305,14 @@ int main(int argc, char **argv)
     // The loop already stops when a round adds nothing, so the fixpoint is
     // what the cap was truncating; the cap remains only as a guard against a
     // database that cycles, and says so if it is ever hit.
-    const int kMaxRounds = 64;
+    // Growth is a fixpoint over a finite set -- every round adds at least one
+    // (tile,wire) endpoint or stops -- so it terminates on its own, and the
+    // cap is insurance against a cyclic database rather than a schedule.  It
+    // was 64, and 64 was not enough: this SoC needs more, and the rounds it
+    // was not given were the ones that carry a signal out of a hard block and
+    // across the tiles that hold nothing but hardwiring.  Truncating growth
+    // does not fail, it silently returns a net with one end missing.
+    const int kMaxRounds = 1024;
 
     // The scan follows the frontier, not the die.  A round can only add an
     // endpoint next to one already known, so there is no reason to visit a
@@ -265,7 +336,9 @@ int main(int argc, char **argv)
     std::set<std::string> frontier_tiles;
     for (const auto &k : known) frontier_tiles.insert(tile_of(k));
 
-    int joins = 0, rounds = 0;
+    int joins = 0, rounds = 0, n_always = 0, n_default = 0;
+    bool settled = false;
+    std::vector<std::pair<std::string, std::string>> ppip_assigns;   // dst, src
     for (int round = 0; round < (hops > 0 ? hops : kMaxRounds); round++) {
         rounds = round + 1;
         size_t before = known.size();
@@ -302,41 +375,55 @@ int main(int argc, char **argv)
                 }
             }
         }
-        if (known.size() == before) break;
-        if (rounds == kMaxRounds)
-            std::cerr << "  warning: net growth did not settle in " << kMaxRounds
-                      << " rounds; some nets may be incomplete\n";
+        // The hardwired hops, in the same fixpoint.  A pseudo-PIP carries no
+        // configuration bit, so the tile it lives in can appear nowhere in the
+        // FASM -- and the tiles that hold nothing BUT hardwiring are exactly
+        // the ones a signal leaving a hard block passes through.  Applying
+        // these only to tiles the FASM names left an MMCM's LOCKED sitting on
+        // INT_INTERFACE_LOGIC_OUTS_L_B18 with nothing to carry it the one hop
+        // to LOGIC_OUTS_L18, where the interconnect could pick it up.
+        //
+        // And they belong INSIDE the loop, not after it: a hop makes a new
+        // endpoint reachable, and what that endpoint reaches is more tile
+        // connections, which is another round's work.  Run afterwards, the
+        // graph stops one hop short of wherever the last hardwired link was.
+        {
+            std::vector<std::string> visit(frontier_tiles.begin(), frontier_tiles.end());
+            visit.insert(visit.end(), next_tiles.begin(), next_tiles.end());
+            for (const auto &t : visit) {
+                auto it = tiles.find(t);
+                if (it == tiles.end()) continue;
+                load_ppips(it->second.type);
+                for (const auto &pp : ppips[it->second.type]) {
+                    if (pp[2] == "hint") continue;
+                    if (pp[2] == "default" && !use_default_ppips) continue;
+                    std::string dst = tw(t, pp[0]), src = tw(t, pp[1]);
+                    bool kd = known.count(dst), ks = known.count(src);
+                    if (!kd && !ks) continue;
+                    if (pip_driven.count(dst)) continue;
+                    ppip_assigns.push_back({dst, src});
+                    pip_driven.insert(dst);
+                    dsu.find(dst); dsu.find(src);
+                    if (!kd) { known.insert(dst); next_tiles.insert(t); }
+                    if (!ks) { known.insert(src); next_tiles.insert(t); }
+                    (pp[2] == "always" ? n_always : n_default)++;
+                }
+            }
+        }
+        if (known.size() == before) { settled = true; break; }
         frontier_tiles.swap(next_tiles);
     }
+    // Said after the loop, and only when the loop is what stopped: the test
+    // used to be "we reached round 64", which is not the same thing -- it
+    // fired on the round the cap happens to name even when the cap had been
+    // raised and the growth went on to finish, so a real truncation and a
+    // healthy long run were reported identically.
+    if (!settled)
+        std::cerr << "  warning: net growth did not settle in " << rounds
+                  << " rounds; some nets may be incomplete\n";
+    std::cerr << "  pseudo-PIPs applied: " << n_always << " always, " << n_default
+              << " default\n";
 
-    // ---- pseudo-PIPs: the connections that carry no bits ------------------
-    // ppips_<type>.db lists hardwired paths.  `always` is permanently on and
-    // appears in no bitstream, so a net graph built only from FASM features is
-    // missing them -- which leaves, among others, every slice's X bypass
-    // undriven and sitting at the pull-up.  `default` is on unless the
-    // destination is driven by a real PIP, so it is applied only where nothing
-    // else drives it.  `hint` is documentation and is ignored.
-    std::map<std::string, std::vector<std::array<std::string, 3>>> ppips; // type -> (dst,src,kind)
-    auto load_ppips = [&](const std::string &type) {
-        if (ppips.count(type)) return;
-        std::string lower;
-        for (char c : type) lower.push_back(char(tolower(c)));
-        std::ifstream in(db + "/ppips_" + lower + ".db");
-        std::vector<std::array<std::string, 3>> v;
-        std::string line;
-        while (std::getline(in, line)) {
-            std::istringstream ls(line);
-            std::string feat, kind;
-            if (!(ls >> feat >> kind)) continue;
-            auto d1 = feat.find('.');
-            if (d1 == std::string::npos) continue;
-            auto d2 = feat.find('.', d1 + 1);
-            if (d2 == std::string::npos) continue;
-            v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
-        }
-        ppips[type] = v;
-    };
-    for (const auto &t : used) if (tiles.count(t)) load_ppips(tiles[t].type);
 
     // ---- I/O: the fabric's edge ------------------------------------------
     // An IOB or IOI site is a buffer this prototype does not model, so the nets
@@ -421,11 +508,41 @@ int main(int argc, char **argv)
 
     // ---- routing features: one assign each -------------------------------
     std::vector<std::pair<std::string, std::string>> assigns; // dst, src
+
+    // I/O sites holding a DDR register rather than a wire.  Recorded here and
+    // emitted further down, where net() exists: an instance pin written with a
+    // different spelling from the rest of the netlist splits the net in two.
+    struct DdrSite {
+        std::string tile, site, prim, iname;             // IDDR or ODDR
+        std::vector<std::pair<std::string, std::string>> ports; // port, tile wire
+    };
+    std::vector<DdrSite> ddr_sites;
+    // A non-slice site's configuration, kept against the site that set it.
+    // These are the features the model reads to know what a hard block is
+    // configured as; the ones it has no use for are still counted, so the
+    // report says how much of the bitstream went unread.
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> site_feats; // tile -> site -> features
     int skipped_site_cfg = 0;
     for (const auto &kv : dc.other_tiles) {
         const std::string &tile = kv.first;
+        auto ti = tiles.find(tile);
+        const std::vector<std::string> *sn =
+            ti == tiles.end() ? nullptr : &site_names[ti->second.type];
         for (const auto &feat : kv.second) {
             auto dot = feat.find('.');
+            // "<site>.<feature>" and "<dstwire>.<srcwire>" are the same shape,
+            // so the only thing that tells them apart is whether the first
+            // component names a site of this tile.  Reading a site's
+            // configuration as a PIP is not harmless: it invents a net called
+            // RAMB18_Y0 driven by one called IN_USE, and every such pair is a
+            // wire the design does not have.
+            if (dot != std::string::npos && sn) {
+                std::string head = feat.substr(0, dot);
+                if (std::find(sn->begin(), sn->end(), head) != sn->end()) {
+                    site_feats[tile][head].push_back(feat.substr(dot + 1));
+                    continue;
+                }
+            }
             if (dot == std::string::npos || feat.find('.', dot + 1) != std::string::npos) {
                 skipped_site_cfg++;   // site config for a non-slice site, not a PIP
                 continue;
@@ -438,32 +555,82 @@ int main(int argc, char **argv)
     }
 
 
-    // ---- pseudo-PIPs -----------------------------------------------------
-    // Hardwired paths that carry no configuration bit, so they appear in no
-    // FASM.  `always` is permanently on -- without it every slice's X bypass
-    // is undriven.  `default` applies only where no real PIP drives the
-    // destination.  `hint` is documentation.
+    // The pseudo-PIPs were applied during growth, above; fold them in now that
+    // the FASM's own routing features have been read.
+    assigns.insert(assigns.end(), ppip_assigns.begin(), ppip_assigns.end());
+
+    // ---- where the block RAMs are ----------------------------------------
+    // Worked out once: the clock tree needs it below, and the instances that
+    // get emitted further down need it again.
+    struct BramSite
     {
-        std::set<std::string> pip_driven;
-        for (const auto &a : assigns) pip_driven.insert(a.first);
-        int n_always = 0, n_default = 0;
-        for (const auto &t : used) {
-            auto it = tiles.find(t);
-            if (it == tiles.end()) continue;
-            for (const auto &pp : ppips[it->second.type]) {
-                if (pp[2] == "hint") continue;
-                if (pp[2] == "default" && !use_default_ppips) continue;
-                std::string dst = tw(t, pp[0]), src = tw(t, pp[1]);
-                if (!known.count(dst) && !known.count(src)) continue;
-                if (pip_driven.count(dst)) continue;
-                assigns.push_back({dst, src});
-                pip_driven.insert(dst);
-                dsu.find(dst); dsu.find(src);
-                (pp[2] == "always" ? n_always : n_default)++;
+        std::string tile, site, cfg_site;
+        const char *prefix;
+        bool is36;
+        std::map<std::string, std::string> canon;   // canonical port -> tile wire
+    };
+    std::vector<BramSite> bram_sites;
+    for (const auto &tf : site_feats) {
+        const std::string &tile = tf.first;
+        auto ti = tiles.find(tile);
+        if (ti == tiles.end() || ti->second.type.rfind("BRAM_", 0) != 0) continue;
+        const auto &per = site_pins[ti->second.type];
+        // The three sites in a BRAM tile spell their PINS differently (prjxray
+        // types the lower 18Kb one FIFO18E1, so its pins carry FIFO names) but
+        // every site's WIRES are named after the primitive's own ports, so the
+        // port name reads off the wire and needs no translation table.
+        auto canon_of = [&](const char *prefix) {
+            std::map<std::string, std::string> c;
+            for (const auto &m : per) {
+                if (m.empty()) continue;
+                bool all = true;
+                for (const auto &pw : m)
+                    if (pw.second.rfind(prefix, 0) != 0) { all = false; break; }
+                if (!all) continue;
+                for (const auto &pw : m) c[pw.second.substr(strlen(prefix))] = pw.second;
+                break;
+            }
+            return c;
+        };
+        // 36Kb mode has no configuration bit of its own: prjxray's RAMB36 tags
+        // are all "this bit is clear", so a plain RAMB36 emits none of them.
+        // What does say so is which site's pins the tile's routing touches --
+        // the same test src/cells_bram.cpp makes, off the same features.  A
+        // 36Kb memory's control pins are still configured on its lower half.
+        bool is36 = false;
+        auto ot = dc.other_tiles.find(tile);
+        if (ot != dc.other_tiles.end())
+            for (const auto &f : ot->second)
+                if (f.find("BRAM_FIFO36_") != std::string::npos) { is36 = true; break; }
+        if (is36) {
+            bram_sites.push_back({tile, "RAMB36_Y0", "RAMB18_Y0", "BRAM_FIFO36_", true,
+                                  canon_of("BRAM_FIFO36_")});
+        } else {
+            for (const auto &sf : tf.second) {
+                const char *prefix = sf.first == "RAMB18_Y0"   ? "BRAM_FIFO18_"
+                                     : sf.first == "RAMB18_Y1" ? "BRAM_RAMB18_"
+                                                               : nullptr;
+                if (!prefix) continue;
+                bram_sites.push_back({tile, sf.first, sf.first, prefix, false, canon_of(prefix)});
             }
         }
-        std::cerr << "  pseudo-PIPs applied: " << n_always << " always, " << n_default << " default\n";
     }
+
+    // A block RAM is clocked by the same one BUFG as everything else, on the
+    // same argument the slices are joined on above: with a single clock in the
+    // design there is only one thing its clock pins can be.  Without this the
+    // memory's clock pin sits on the interconnect pull-up, and a boundary that
+    // compares a clock against a constant fails for a reason that has nothing
+    // to do with the design.
+    if (simple_clock && one_clock)
+        for (const auto &b : bram_sites)
+            for (const char *pin : {"CLKARDCLK", "CLKBWRCLK", "REGCLKARDRCLK", "REGCLKB",
+                                    "CLKARDCLKL", "CLKARDCLKU", "CLKBWRCLKL", "CLKBWRCLKU",
+                                    "REGCLKARDRCLKL", "REGCLKARDRCLKU", "REGCLKBL",
+                                    "REGCLKBU"}) {
+                auto it = b.canon.find(pin);
+                if (it != b.canon.end()) dsu.unite(tw(b.tile, it->second), bufg_outs.front());
+            }
 
     // With the tree simplified, the clock net's own routing features -- real
     // and pseudo alike -- drive it from pieces of a path we have replaced.
@@ -551,6 +718,13 @@ int main(int argc, char **argv)
         std::set<std::string> already;
         for (const auto &a : assigns)
             already.insert(a.first);
+        // Pins a DDR register owns.  The database declares the site's output
+        // bypass as a hardwired pseudo-PIP and it is applied to every site,
+        // including the ones where a REGISTER drives the pin -- so the net
+        // ends up with two drivers, the register and a wire straight past it,
+        // and which one a reader believes is a coin toss.  Collected here and
+        // filtered out below, once the loop has seen every site.
+        std::set<std::string> ddr_driven;
         int bypassed = 0, unmodelled_io = 0, hardwired = 0;
         for (const auto &tkv : dc.other_tiles) {
             auto ti = tiles.find(tkv.first);
@@ -574,6 +748,90 @@ int main(int argc, char **argv)
                     // the site's FASM name carries the same index its wires do
                     std::string idx = owire.substr(at + tag.size(), 1);
                     auto cfg = dc.iologic.find(tkv.first + "/" + tag + "_Y" + idx);
+                    // A DDR register is cut at its boundary and instantiated,
+                    // the way a block RAM is: the checker treats the outputs as
+                    // free and the inputs as obligations, so what is asserted is
+                    // which net reaches which pin.  The synthesis side is cut on
+                    // the same primitive with the same port names, so the two
+                    // cuts cancel.  Modelling the two edges instead would put a
+                    // negedge register into a proof with no notion of one.
+                    if (cfg != dc.iologic.end() && cfg->second.is_ddr_block() &&
+                        (kind == 0 || kind == 1)) {
+                        static const char *iddr_ports[][2] = {
+                            {"D", "D"}, {"C", "CLK"}, {"CE", "CE1"}, {"R", "SR"},
+                            {"Q1", "Q1"}, {"Q2", "Q2"}, {nullptr, nullptr}};
+                        static const char *oddr_ports[][2] = {
+                            {"Q", "OQ"}, {"C", "CLK"}, {"CE", "OCE"}, {"R", "SR"},
+                            {"D1", "D1"}, {"D2", "D2"}, {nullptr, nullptr}};
+                        const bool in = (kind == 0);
+                        DdrSite ds;
+                        ds.tile = tkv.first;
+                        ds.site = tag + "_Y" + idx;
+                        ds.prim = in ? "IDDR" : "ODDR";
+                        ds.iname = tkv.first + "_" + ds.site;
+                        for (auto pp = in ? iddr_ports : oddr_ports; (*pp)[0]; pp++) {
+                            const char *port = (*pp)[0];
+                            std::string sitepin = (*pp)[1];
+                            // The input mux may take the delayed tap instead.
+                            if (in && sitepin == "D" && cfg->second.delayed_input)
+                                sitepin = "DDLY";
+                            auto q = pins.find(sitepin);
+                            if (q == pins.end()) continue;
+                            ds.ports.push_back({port, q->second});
+                        }
+                        // The site drives its outputs, so nothing else may.
+                        for (const auto &pr : ds.ports)
+                            if ((in && pr.first.rfind("Q", 0) == 0) ||
+                                (!in && pr.first == "Q")) {
+                                already.insert(tw(tkv.first, pr.second));
+                                ddr_driven.insert(tw(tkv.first, pr.second));
+                            }
+                        ddr_sites.push_back(std::move(ds));
+
+                        // An OLOGIC holds TWO registers, not one: the OUTFF on
+                        // the data path and the TFF on the tristate path, each
+                        // a separate ODDR cell in the synthesis.  Emit the
+                        // second whenever the site says its T register is in
+                        // use, or a bidirectional pad is short by one cell and
+                        // everything the pad feeds reads as different.
+                        // ...but IN_USE alone over-states it.  An
+                        // output-only pad wears the bit too -- the SD clock
+                        // does -- while its netlist holds no tristate cell at
+                        // all, and emitting one there swaps a missing cell for
+                        // a spurious one.  What separates the two is the
+                        // routing: a real tristate has the fabric driving T1.
+                        // On this design that test picks out exactly the five
+                        // sites prjxray also marks ZINV_T1, which is the
+                        // independent confirmation that it picks the right ones.
+                        auto t1 = pins.find("T1");
+                        const bool t_driven = t1 != pins.end() &&
+                                              pip_driven.count(tw(tkv.first, t1->second));
+                        if (!in && cfg->second.tddr_in_use && t_driven) {
+                            static const char *tddr_ports[][2] = {
+                                {"Q", "TQ"}, {"C", "CLK"}, {"CE", "TCE"},
+                                {"R", "SR"}, {"D1", "T1"}, {"D2", "T2"},
+                                {nullptr, nullptr}};
+                            DdrSite ts;
+                            ts.tile = tkv.first;
+                            ts.site = tag + "_Y" + idx;
+                            ts.prim = "ODDR";
+                            // Two cells in one site need two names, and the
+                            // suffix is the bel the placement already names.
+                            ts.iname = tkv.first + "_" + ts.site + "_TFF";
+                            for (auto pp = tddr_ports; (*pp)[0]; pp++) {
+                                auto q = pins.find((*pp)[1]);
+                                if (q == pins.end()) continue;
+                                ts.ports.push_back({(*pp)[0], q->second});
+                            }
+                            for (const auto &pr : ts.ports)
+                                if (pr.first == "Q") {
+                                    already.insert(tw(tkv.first, pr.second));
+                                    ddr_driven.insert(tw(tkv.first, pr.second));
+                                }
+                            ddr_sites.push_back(std::move(ts));
+                        }
+                        continue;
+                    }
                     if (cfg != dc.iologic.end() && !cfg->second.is_bypass()) {
                         unmodelled_io++;
                         continue;
@@ -603,9 +861,20 @@ int main(int argc, char **argv)
         if (bypassed || hardwired || unmodelled_io) {
             std::cerr << "  I/O logic: " << bypassed << " pass-through added, " << hardwired
                       << " already hardwired";
+            if (!ddr_sites.empty())
+                std::cerr << ", " << ddr_sites.size() << " DDR cut at their boundary";
             if (unmodelled_io)
                 std::cerr << ", " << unmodelled_io << " doing more than a wire (not modelled)";
             std::cerr << "\n";
+        }
+        if (!ddr_driven.empty()) {
+            std::vector<std::pair<std::string, std::string>> kept;
+            for (const auto &a : assigns)
+                if (!ddr_driven.count(a.first)) kept.push_back(a);
+            if (kept.size() != assigns.size())
+                std::cerr << "  dropped " << (assigns.size() - kept.size())
+                          << " bypass assign(s) onto a pin a DDR register drives\n";
+            assigns.swap(kept);
         }
     }
 
@@ -652,22 +921,54 @@ int main(int argc, char **argv)
 // this model does not implement resolve to 0 and are reported by the emitter.
 module xcol #(
     parameter [63:0] INIT = 64'h0,
-    parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | none
+    parameter RAM     = 0,        // 1 = the LUT storage is writable
+    parameter RAM32   = 0,        // 1 = two 32-deep halves rather than one 64
+    parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | F7F8 | none
     parameter FF5_SRC = "none",   // O5 | X | none
-    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | none
+    parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | F7 | F8 | none
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
     parameter SYNC = 1'b1
 ) (
     input  wire A1, A2, A3, A4, A5, A6, X,
+    // The wide multiplexer that reaches this column.  It is built OUTSIDE the
+    // column, from two neighbouring columns' O6 and one of the slice's bypass
+    // pins, because that is where it physically is -- a column cannot see its
+    // neighbour's LUT, and pretending otherwise here would put the wiring in
+    // the one place that cannot get it right.
+    input  wire FX,
     input  wire CLK, CE, SR, CI,
+    input  wire [5:0] WA,         // write address, shared by the whole slice
+    input  wire DI, DI2, WE,      // write data (DI2 = the upper half when 32-deep)
     output wire O6, O5, Q, MUX, CO
 );
     wire [5:0] idx6 = {A6, A5, A4, A3, A2, A1};
     wire [5:0] idx5 = {1'b0, A5, A4, A3, A2, A1};
-    assign O6 = INIT[idx6];
-    assign O5 = INIT[idx5];
+
+    // Distributed RAM is this same storage made writable: the read path is
+    // unchanged -- it IS the LUT read -- so the only new behaviour is a write
+    // port, and a column with RAM=0 reduces to exactly the constant it was.
+    //
+    // 64 deep: one memory, written at WA from DI.
+    // 32 deep: TWO memories in the one LUT, each five bits deep.  The low half
+    // is what O5 reads and the high half what O6 reads with A6 high, so they
+    // take separate write data -- DI and DI2 -- at the same address.  Treating
+    // this as one 64-deep memory with a six-bit address would write one half
+    // and leave the other holding its initial contents for ever.
+    reg [63:0] mem = INIT;
+    always @(posedge CLK)
+        if (RAM && WE) begin
+            if (RAM32) begin
+                mem[{1'b0, WA[4:0]}] <= DI;
+                mem[{1'b1, WA[4:0]}] <= DI2;
+            end else begin
+                mem[WA] <= DI;
+            end
+        end
+
+    assign O6 = mem[idx6];
+    assign O5 = mem[idx5];
 
     // CARRY4, one bit of it: O6 is the propagate select, and the data input
     // is O5 or the bypass depending on CY0.  CO ripples to the next column,
@@ -678,7 +979,7 @@ module xcol #(
 
     wire ff_d  = (FF_SRC  == "O6")  ? O6 : (FF_SRC  == "O5") ? O5 :
                  (FF_SRC  == "X")   ? X  : (FF_SRC  == "XOR") ? xo :
-                 (FF_SRC  == "CY")  ? CO : 1'b0;
+                 (FF_SRC  == "CY")  ? CO : (FF_SRC == "F7F8") ? FX : 1'b0;
     wire ff5_d = (FF5_SRC == "O5") ? O5 : (FF5_SRC == "X")  ? X  : 1'b0;
 
     reg q = FF_INIT, q5 = FF5_INIT;
@@ -698,7 +999,8 @@ module xcol #(
     assign Q   = q;
     assign MUX = (OUTMUX == "O6")  ? O6 : (OUTMUX == "O5") ? O5 :
                  (OUTMUX == "5Q")  ? q5 : (OUTMUX == "XOR") ? xo :
-                 (OUTMUX == "CY")  ? CO : 1'b0;
+                 (OUTMUX == "CY")  ? CO :
+                 (OUTMUX == "F7" || OUTMUX == "F8") ? FX : 1'b0;
 endmodule
 
 )";
@@ -716,6 +1018,9 @@ endmodule
     // slice instances (built first: slice outputs count as driven)
     std::ostringstream body;
     std::vector<std::string> carry_wires;
+    // Nets this model invents rather than reads out of the fabric: the outputs
+    // of a slice's wide multiplexers and of a block RAM's pin inverters.
+    std::vector<std::string> helper_wires;
     std::vector<std::pair<std::string, std::string>> carry_assigns;
     int inst = 0, unmodelled = 0;
     for (const auto &kv : dc.slices) {
@@ -765,16 +1070,95 @@ endmodule
             if (cout_pin != "1'b0") carry_assigns.push_back({cout_pin, co_of['D']});
         }
 
+        // The wide multiplexers.  A SLICE has two MUXF7s and one MUXF8, and
+        // which LUTs and which bypass pin each one uses is not a guess: it is
+        // what nextpnr's own packer builds (himbaechel/uarch/xilinx, pack.cc
+        // constrain_muxf_tree and xilinx_place.cc).  There, I1's driver stays
+        // in the same eight and I0's sits one spacing up, and the select is
+        // the X input of the eight the mux is charged to:
+        //
+        //   F7A = AX ? A.O6 : B.O6     reaches column A
+        //   F7B = CX ? C.O6 : D.O6     reaches column C
+        //   F8  = BX ? F7A  : F7B      reaches column B
+        //
+        // Built here rather than inside `xcol` because it spans columns, and
+        // emitted as MUXF7/MUXF8 cells so that both sides of a comparison
+        // describe it with the same primitive.  Only built where a column
+        // actually selects it -- there is no feature saying a mux exists, only
+        // features saying a column reads one.
+        std::map<char, std::string> fx_of;
+        {
+            auto selects_wide = [&](char c) {
+                auto it = sc.columns.find(c);
+                if (it == sc.columns.end()) return false;
+                const ColumnConfig &cc = it->second;
+                return cc.outmux == OutMux::F7 || cc.outmux == OutMux::F8 ||
+                       (cc.ff_used && cc.ff_src == FFSrc::Wide);
+            };
+            bool need_a = selects_wide('A'), need_c = selects_wide('C'),
+                 need_b = selects_wide('B');
+            // An F8 is a mux of the two F7s, so wanting it wants them both.
+            if (need_b) need_a = need_c = true;
+            auto mk = [&](const std::string &name, const std::string &type,
+                          const std::string &i0, const std::string &i1, const std::string &sel) {
+                std::string w = prefix + "_" + name;
+                helper_wires.push_back(w);
+                body << "  " << type << " \\" << w << "_m (.I0(" << i0 << "), .I1(" << i1
+                     << "), .S(" << sel << "), .O(" << w << "));\n";
+                return w;
+            };
+            std::string f7a, f7b;
+            if (need_a) f7a = mk("F7A", "MUXF7", net("B"), net("A"), net("AX"));
+            if (need_c) f7b = mk("F7B", "MUXF7", net("D"), net("C"), net("CX"));
+            if (need_a) fx_of['A'] = f7a;
+            if (need_c) fx_of['C'] = f7b;
+            if (need_b) fx_of['B'] = mk("F8", "MUXF8", f7b, f7a, net("BX"));
+        }
+
         for (const auto &cc : sc.columns) {
             char c = cc.first;
             const ColumnConfig &col = cc.second;
             if (!col.init && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
             std::string C(1, c);
+            // Distributed RAM.  The write address is one per SLICE, not one
+            // per column -- it arrives on the slice's WA pins, which the D
+            // column's address inputs drive -- so every column of a memory
+            // writes at the same place while each reads at its own.  The
+            // write data is per column, chosen by that column's DI1 mux;
+            // DI2 is the second datum the 32-deep mode needs, and it is the
+            // column's X bypass pin.
+            std::string wa = "6'b0", di = "1'b0", di2 = "1'b0", we = "1'b0";
+            if (col.ram) {
+                std::string w;
+                for (int i = 6; i >= 1; i--) w += (i < 6 ? ", " : "") + net("D" + std::to_string(i));
+                wa = "{" + w + "}";
+                // The DI1 mux is a CHAIN, not a per-column choice: a column
+                // with no DI1MUX feature of its own does not fall back to the
+                // shared DI pin, it takes whatever the column below resolved
+                // to.  A takes AI, or failing that B's choice; B takes BI or
+                // DI; C takes CI or DI; D always takes DI.  Reading it as a
+                // per-column default writes column A from the wrong pin
+                // whenever B is the one holding the write data.
+                auto di_of = [&](char x) {
+                    auto own = [&](char y) {
+                        auto it = sc.columns.find(y);
+                        return it != sc.columns.end() && it->second.di1 == Di1Src::OwnI;
+                    };
+                    if (x == 'A') return own('A') ? net("AI") : own('B') ? net("BI") : net("DI");
+                    if (x == 'B') return own('B') ? net("BI") : net("DI");
+                    if (x == 'C') return own('C') ? net("CI") : net("DI");
+                    return net("DI");
+                };
+                di = di_of(c);
+                di2 = net(C + "X");
+                we = sc.we_from_ce ? net("CE") : net("WE");
+            }
             const char *ffsrc = col.ff_used ? (col.ff_src_explicit ? to_string(col.ff_src) : "O6") : "none";
             const char *ff5src = col.ff5_used ? (col.ff5_src_explicit ? to_string(col.ff5_src) : "O5") : "none";
             std::ostringstream initv;
             initv << "64'h" << std::hex << (col.init ? *col.init : 0);
-            body << "  xcol #(." << "INIT(" << initv.str() << "), .FF_SRC(\"" << ffsrc
+            body << "  xcol #(." << "INIT(" << initv.str() << "), .RAM(" << (col.ram ? 1 : 0)
+               << "), .RAM32(" << (col.ram && col.ram_small ? 1 : 0) << "), .FF_SRC(\"" << ffsrc
                << "\"), .FF5_SRC(\"" << ff5src << "\"), .OUTMUX(\"" << to_string(col.outmux)
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
@@ -792,7 +1176,9 @@ endmodule
                // whatever PRECYINIT selected at the bottom of the slice.  A
                // column outside a chain still has the pin, tied low, because
                // the model's XOR and CY paths read it unconditionally.
-               << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "),\n"
+               << ".CI(" << (ci_of.count(c) ? ci_of[c] : std::string("1'b0")) << "), "
+               << ".FX(" << (fx_of.count(c) ? fx_of[c] : std::string("1'b0")) << "),\n"
+               << "     .WA(" << wa << "), .DI(" << di << "), .DI2(" << di2 << "), .WE(" << we << "),\n"
                << "     .O6(" << net(C) << "), .O5(), .Q(" << net(C + "Q")
                << "), .MUX(" << net(C + "MUX") << "), .CO("
                << (co_of.count(c) ? co_of[c] : std::string()) << "));\n";
@@ -800,6 +1186,162 @@ endmodule
             if (!raw(C + "Q").empty()) driven_raw.insert(raw(C + "Q"));
             if (!raw(C + "MUX").empty()) driven_raw.insert(raw(C + "MUX"));
             inst++;
+        }
+    }
+
+    // ---- block RAM: cut, not modelled ------------------------------------
+    // A RAMB18E1 or RAMB36E1 is instantiated here with nothing inside it, and
+    // that is the whole point.  The checker treats a memory's data outputs as
+    // free variables and every one of its inputs as an obligation, so what has
+    // to be right is the BOUNDARY -- which net reaches which pin -- and not
+    // the contents.  The synthesis side is cut in the same place, on the same
+    // primitive with the same port names, which is what lets the two cuts
+    // cancel and the cones downstream of a ROM become comparable at all.
+    //
+    // What this does NOT check is the initial contents.  Two block RAMs with
+    // identical boundaries and different INIT strings pass here.  That is a
+    // real gap and it is deliberate: `fasm2netlist` reads the contents out of
+    // the bitstream, and tests/rtl/build_and_check.py compares them.
+    int brams = 0;
+    for (const auto &b : bram_sites) {
+        if (b.canon.empty()) continue;
+        // prjxray stores an inversion complemented, so the pins to invert are
+        // the ones with no ZINV tag.
+        std::set<std::string> inverted;
+        {
+            auto tfi = site_feats.find(b.tile);
+            if (tfi != site_feats.end()) {
+                auto cf = tfi->second.find(b.cfg_site);
+                if (cf != tfi->second.end())
+                    for (const char *pin : bram::kInvertible)
+                        if (std::find(cf->second.begin(), cf->second.end(),
+                                      "ZINV_" + std::string(pin)) == cf->second.end())
+                            inverted.insert(pin);
+            }
+        }
+        std::string iname = sanitise(b.tile + "_" + b.site);
+        std::ostringstream o;
+        bool first = true;
+
+        // One port of the primitive.  `base` is the site pin its bit 0 sits
+        // on; `baseU` the upper 18Kb half's copy, which exists only on the
+        // 36Kb site and which in 36Kb mode carries the same signal.
+        auto wire_up = [&](const char *port, int width, bool out, const bram::Port36 *p36,
+                           const std::string &base) {
+            int n = width ? width : 1;
+            std::vector<std::string> bits;   // MSB first, as a concatenation is written
+            bool any = false;
+            for (int i = n - 1; i >= 0; i--) {
+                std::string suffix = width ? std::to_string(i) : std::string();
+                std::string bit;
+                std::vector<std::string> sps;
+                if (p36) {
+                    auto [l, u] = bram::pins36(*p36, i);
+                    sps.push_back(l);
+                    if (!u.empty()) sps.push_back(u);
+                } else {
+                    sps.push_back(base + suffix);
+                }
+                for (const auto &sp : sps) {
+                    auto it = b.canon.find(sp);
+                    if (it == b.canon.end()) continue;
+                    std::string raw = tw(b.tile, it->second);
+                    if (out) driven_raw.insert(raw);
+                    // Referencing the endpoint is what puts an unrouted pin on
+                    // the interconnect pull-up, the same as every other net
+                    // the design leaves alone.
+                    std::string nm = emit_net(raw);
+                    if (bit.empty()) bit = nm;
+                }
+                if (!bit.empty()) any = true;
+                bits.push_back(bit.empty() ? "1'b0" : bit);
+            }
+            if (!any) return;
+            // An inverted control pin gets a real inverter rather than a note
+            // in a parameter, because what a boundary compares is the value
+            // the site SEES.  The synthesis says the same thing the other way
+            // round, as IS_<pin>_INVERTED, and src/lvs/cone.cpp applies it
+            // there so that the two descriptions meet.  Every invertible pin
+            // is a scalar, so there is no bus case to get wrong.
+            if (!width && inverted.count(port)) {
+                std::string w = iname + "_" + port + "_inv";
+                helper_wires.push_back(w);
+                body << "  INV \\" << w << "_i (.I(" << bits[0] << "), .O(" << w << "));\n";
+                bits[0] = w;
+            }
+            o << (first ? "" : ", ") << "." << port << "(";
+            first = false;
+            if (width) {
+                o << "{";
+                for (size_t i = 0; i < bits.size(); i++) o << (i ? ", " : "") << bits[i];
+                o << "}";
+            } else {
+                o << bits[0];
+            }
+            o << ")";
+        };
+
+        if (b.is36)
+            for (const auto &p : bram::kRamb36) wire_up(p.port, p.width, p.out, &p, p.pin);
+        else
+            for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, nullptr, p.name);
+        if (first) continue;   // the routing touches none of it
+        body << "  " << (b.is36 ? "RAMB36E1" : "RAMB18E1") << " \\" << iname << " (" << o.str()
+             << ");\n";
+        brams++;
+    }
+    if (brams) std::cerr << "  block RAMs cut at their boundary: " << brams << "\n";
+
+    // ---- DDR registers, cut at their boundary --------------------------
+    // Same contract as the block RAMs above: the primitive is instantiated
+    // empty, and what the proof asserts is the boundary.  An IDDR's Q1 and Q2
+    // become free variables and its D, C, CE and R become obligations; the
+    // synthesis side carries the same primitive with the same port names, so
+    // the cuts cancel and the cones on either side stay comparable.
+    //
+    // What this does NOT check is the capture edge, the initial value or the
+    // set/reset value.  Two IDDRs with the same boundary and different
+    // DDR_CLK_EDGE pass here.  That is a real gap, and the honest one: the
+    // alternative is a negedge register in a proof that has no notion of one.
+    for (const auto &d : ddr_sites) {
+        std::ostringstream o;
+        bool first = true;
+        for (const auto &pr : d.ports) {
+            std::string raw = tw(d.tile, pr.second);
+            // Outputs are driven by this instance and by nothing else, the same
+            // bookkeeping a block RAM's data outputs get.
+            if (pr.first == "Q" || pr.first.rfind("Q", 0) == 0)
+                driven_raw.insert(raw);
+            o << (first ? "" : ", ") << "." << pr.first << "(" << emit_net(raw) << ")";
+            first = false;
+        }
+        if (first) continue;   // the routing touches none of it
+        body << "  " << d.prim << " \\" << d.iname << " (" << o.str() << ");\n";
+    }
+    if (!ddr_sites.empty())
+        std::cerr << "  DDR registers cut at their boundary: " << ddr_sites.size() << "\n";
+
+    // ---- the clock manager's LOCKED pin --------------------------------
+    // The MMCM itself is not modelled and cannot usefully be: what comes out
+    // of it is a frequency, and this program only reasons about Boolean
+    // values.  But one of its pins IS Boolean -- LOCKED, which the reset
+    // circuit of practically every LiteX SoC reads -- and leaving it on the
+    // interconnect pull-up makes it a CONSTANT, so a reset synchroniser that
+    // waits for the PLL compares against 1 and differs for a reason that has
+    // nothing to do with the design.  Emitting the block with just that pin
+    // makes it a cut point instead: a free variable the placement can pair
+    // with the synthesis's own, which is what it honestly is.
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        if (ti == tiles.end() || ti->second.type.rfind("CMT_TOP", 0) != 0) continue;
+        for (const auto &pins : site_pins[ti->second.type]) {
+            auto lk = pins.find("LOCKED");
+            if (lk == pins.end()) continue;
+            std::string raw = tw(kv.first, lk->second);
+            driven_raw.insert(raw);
+            body << "  MMCME2_ADV \\" << sanitise(kv.first + "_MMCME2_ADV") << " (.LOCKED("
+                 << emit_net(raw) << "));\n";
+            break;
         }
     }
 
@@ -949,6 +1491,7 @@ endmodule
     for (const auto &a : assigns)
         os << "  assign " << emit_net(a.first) << " = " << emit_net(a.second) << ";\n";
     for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
+    for (const auto &w : helper_wires) os << "  wire " << w << ";\n";
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
     os << "\n" << body.str() << "endmodule\n";
 
@@ -959,7 +1502,8 @@ endmodule
         std::cerr << "  " << bufg_outs.size() << " BUFG outputs: clock tree left to the routing,"
                   << " since one clock per design is what the simplification assumes\n";
     std::cerr << "tileverilog: " << dc.slices.size() << " slices, " << inst << " column instances, "
-              << assigns.size() << " routing assigns, " << roots.size() << " nets\n";
+              << assigns.size() << " routing assigns, " << roots.size() << " nets"
+              << " (net growth settled in " << rounds << " rounds)\n";
     if (unmodelled) std::cerr << "  " << unmodelled << " slice features not modelled (see tiledump --gaps)\n";
     if (skipped_site_cfg) std::cerr << "  " << skipped_site_cfg << " non-slice site features skipped\n";
     return 0;

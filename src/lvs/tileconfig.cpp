@@ -31,6 +31,14 @@ const char *to_string(PreCyInit s)
     default: return "none";
     }
 }
+const char *to_string(Di1Src s)
+{
+    switch (s) {
+    case Di1Src::OwnI: return "own";
+    case Di1Src::Chain: return "chain";
+    default: return "DI";
+    }
+}
 const char *to_string(OutMux s)
 {
     switch (s) {
@@ -149,6 +157,53 @@ DesignConfig read_fasm(const std::string &path)
             // The tristate path is not the data path: a pad driven all the
             // time still configures it, and BUF is that "always on" setting.
             else if (rest == "OSERDES.DATA_RATE_TQ.BUF") {}
+            // ...and neither is the inversion on it.  ZINV_T1 decides whether
+            // the pad drives when T is high or low, which changes WHEN the pad
+            // is driven and never WHAT it drives.  The data path is what this
+            // model states, and it does not state the tristate -- so a pad whose
+            // output enable is inverted passes here.  That is the same gap
+            // DATA_RATE_TQ.BUF above already leaves, named rather than widened.
+            else if (rest == "ZINV_T1" || rest == "ZINV_T2" ||
+                     rest == "ZINV_T3" || rest == "ZINV_T4") {}
+            // The tristate path can hold a REGISTER, though, and that is not a
+            // gap that can be left: the synthesis spends a whole ODDR cell on
+            // it, bound to the site's TFF bel beside the OUTFF the data path
+            // uses.  Extract only the data register and the two sides disagree
+            // by one cell per bidirectional pad -- six of them on an SD bus.
+            else if (rest == "ODDR_TDDR.IN_USE") io.tddr_in_use = true;
+
+            // ---- DDR registers in the I/O site -----------------------------
+            // These say the site holds a register rather than a wire.  Recorded
+            // rather than dropped, so the extractor can cut the site at its
+            // boundary and instantiate the primitive -- see is_ddr_block().
+            else if (rest == "IDDR.IN_USE") io.is_iddr = true;
+            else if (rest == "OSERDES.DATA_RATE_OQ.DDR") io.is_oddr = true;
+            // A wide SERDES wears the same DDR bits but is a different thing:
+            // there is no single primitive whose boundary matches on the
+            // synthesis side, so mark it and let is_ddr_block() refuse rather
+            // than emit an ODDR that is not what the silicon holds.
+            else if (rest.rfind("OSERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            else if (rest.rfind("ISERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            // The rest configure a DDR register without changing which net
+            // reaches which pin, which is all the boundary cut asserts: initial
+            // and set/reset values, set/reset style, capture edge, the shared
+            // ISERDES plumbing an IDDR sits inside, and the inversions.
+            else if (rest == "IDDR_OR_ISERDES.IN_USE" || rest == "OSERDES.IN_USE" ||
+                     rest == "ODDR_TDDR.IN_USE" || rest == "ODDR.SRUSED" ||
+                     rest.rfind("ISERDES.MODE.", 0) == 0 ||
+                     rest.rfind("ISERDES.NUM_CE.", 0) == 0 ||
+                     rest.rfind("IFF.DDR_CLK_EDGE.", 0) == 0 ||
+                     rest.rfind("ODDR.DDR_CLK_EDGE.", 0) == 0 ||
+                     rest.rfind("IFF.SRTYPE.", 0) == 0 ||
+                     rest.rfind("OSERDES.SRTYPE.", 0) == 0 ||
+                     rest.rfind("OSERDES.TSRTYPE.", 0) == 0 ||
+                     rest.rfind("IFF.ZINIT_Q", 0) == 0 ||
+                     rest.rfind("IFF.ZSRVAL_Q", 0) == 0 ||
+                     rest == "ZINIT_OQ" || rest == "ZINIT_TQ" ||
+                     rest == "ZSRVAL_OQ" || rest == "ZSRVAL_TQ" ||
+                     rest == "IFF.ZINV_C" || rest == "ZINV_CLK") {}
+            // The counterpart of IDELMUXE3.P0 below: straight from the pad.
+            else if (rest == "IDELMUXE3.P1") io.delayed_input = false;
             // The ILOGIC input mux: P0 takes the delayed input from the
             // IDELAY beside it rather than the pad's own D.
             else if (rest == "IDELMUXE3.P0") io.delayed_input = true;
@@ -263,6 +318,21 @@ DesignConfig read_fasm(const std::string &path)
             else if (sel == "F8") cc.outmux = OutMux::F8;
             else if (sel == "MC31") cc.outmux = OutMux::MC31;
             else sc.unhandled.push_back(rest);
+        } else if (col_ok && tail == "LUT.RAM") {
+            column(c).ram = true;
+        } else if (col_ok && tail == "LUT.SMALL") {
+            column(c).ram_small = true;
+        } else if (col_ok && tail.rfind("LUT.DI1MUX.", 0) == 0) {
+            // <col>I selects the column's own write-data pin; anything else
+            // is the chain that walks write data down from the column above.
+            std::string sel = tail.substr(11);
+            column(c).di1 = (sel == std::string(1, c) + "I") ? Di1Src::OwnI : Di1Src::Chain;
+        } else if (rest == "WEMUX.CE") {
+            sc.we_from_ce = true;
+        } else if (rest == "WA7USED") {
+            sc.wa7used = true;
+        } else if (rest == "WA8USED") {
+            sc.wa8used = true;
         } else {
             sc.unhandled.push_back(rest + (value.empty() ? "" : " = " + value));
         }
@@ -278,6 +348,9 @@ void DesignConfig::dump(std::ostream &os) const
            << (sc.srusedmux ? " sr" : "") << (sc.ceusedmux ? " ce" : "");
         if (sc.precyinit != PreCyInit::None)
             os << " precyinit=" << to_string(sc.precyinit);
+        if (sc.we_from_ce) os << " we=CE";
+        if (sc.wa7used) os << " wa7";
+        if (sc.wa8used) os << " wa8";
         os << "\n";
         for (const auto &[c, cc] : sc.columns) {
             os << "  col " << c;
@@ -294,6 +367,7 @@ void DesignConfig::dump(std::ostream &os) const
                    << ",init=" << cc.ff5_init << ",srval=" << cc.ff5_srval;
             os << " outmux=" << to_string(cc.outmux);
             if (cc.carry_used) os << " cy0=" << (cc.cy0_o5 ? "O5" : "X");
+            if (cc.ram) os << " ram=" << (cc.ram_small ? "32" : "64") << " di1=" << to_string(cc.di1);
             os << "\n";
         }
         for (const auto &u : sc.unhandled)

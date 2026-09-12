@@ -7,7 +7,12 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_executable(fasm2netlist src/main.cpp)
+add_executable(fasm2netlist
+  src/main.cpp
+  src/netlist_core.cpp
+  src/cells_slice.cpp
+  src/cells_dsp.cpp
+  src/cells_bram.cpp)
 target_compile_options(fasm2netlist PRIVATE -Wall -Wextra)
 
 # LVS miter support: a small and-inverter graph plus exporters for the two

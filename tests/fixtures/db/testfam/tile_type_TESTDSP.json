@@ -1,0 +1,446 @@
+{
+ "pips": {},
+ "sites": [
+  {
+   "site_pins": {
+    "A0": {
+     "wire": "DSP_0_A0"
+    },
+    "A1": {
+     "wire": "DSP_0_A1"
+    },
+    "A2": {
+     "wire": "DSP_0_A2"
+    },
+    "ALUMODE0": {
+     "wire": "DSP_0_ALUMODE0"
+    },
+    "ALUMODE1": {
+     "wire": "DSP_0_ALUMODE1"
+    },
+    "ALUMODE2": {
+     "wire": "DSP_0_ALUMODE2"
+    },
+    "ALUMODE3": {
+     "wire": "DSP_0_ALUMODE3"
+    },
+    "B0": {
+     "wire": "DSP_0_B0"
+    },
+    "B1": {
+     "wire": "DSP_0_B1"
+    },
+    "B2": {
+     "wire": "DSP_0_B2"
+    },
+    "C0": {
+     "wire": "DSP_0_C0"
+    },
+    "C1": {
+     "wire": "DSP_0_C1"
+    },
+    "C2": {
+     "wire": "DSP_0_C2"
+    },
+    "CARRYIN": {
+     "wire": "DSP_0_CARRYIN"
+    },
+    "CARRYOUT0": {
+     "wire": "DSP_0_CARRYOUT0"
+    },
+    "CARRYOUT1": {
+     "wire": "DSP_0_CARRYOUT1"
+    },
+    "CARRYOUT2": {
+     "wire": "DSP_0_CARRYOUT2"
+    },
+    "CARRYOUT3": {
+     "wire": "DSP_0_CARRYOUT3"
+    },
+    "CEA1": {
+     "wire": "DSP_0_CEA1"
+    },
+    "CEA2": {
+     "wire": "DSP_0_CEA2"
+    },
+    "CEB1": {
+     "wire": "DSP_0_CEB1"
+    },
+    "CEB2": {
+     "wire": "DSP_0_CEB2"
+    },
+    "CEC": {
+     "wire": "DSP_0_CEC"
+    },
+    "CEM": {
+     "wire": "DSP_0_CEM"
+    },
+    "CEP": {
+     "wire": "DSP_0_CEP"
+    },
+    "CLK": {
+     "wire": "DSP_0_CLK"
+    },
+    "D0": {
+     "wire": "DSP_0_D0"
+    },
+    "D1": {
+     "wire": "DSP_0_D1"
+    },
+    "D2": {
+     "wire": "DSP_0_D2"
+    },
+    "INMODE0": {
+     "wire": "DSP_0_INMODE0"
+    },
+    "INMODE1": {
+     "wire": "DSP_0_INMODE1"
+    },
+    "INMODE2": {
+     "wire": "DSP_0_INMODE2"
+    },
+    "INMODE3": {
+     "wire": "DSP_0_INMODE3"
+    },
+    "INMODE4": {
+     "wire": "DSP_0_INMODE4"
+    },
+    "MULTSIGNOUT": {
+     "wire": "DSP_0_MULTSIGNOUT"
+    },
+    "OPMODE0": {
+     "wire": "DSP_0_OPMODE0"
+    },
+    "OPMODE1": {
+     "wire": "DSP_0_OPMODE1"
+    },
+    "OPMODE2": {
+     "wire": "DSP_0_OPMODE2"
+    },
+    "OPMODE3": {
+     "wire": "DSP_0_OPMODE3"
+    },
+    "OPMODE4": {
+     "wire": "DSP_0_OPMODE4"
+    },
+    "OPMODE5": {
+     "wire": "DSP_0_OPMODE5"
+    },
+    "OPMODE6": {
+     "wire": "DSP_0_OPMODE6"
+    },
+    "OVERFLOW": {
+     "wire": "DSP_0_OVERFLOW"
+    },
+    "P0": {
+     "wire": "DSP_0_P0"
+    },
+    "P1": {
+     "wire": "DSP_0_P1"
+    },
+    "P2": {
+     "wire": "DSP_0_P2"
+    },
+    "PATTERNDETECT": {
+     "wire": "DSP_0_PATTERNDETECT"
+    },
+    "RSTA": {
+     "wire": "DSP_0_RSTA"
+    },
+    "RSTB": {
+     "wire": "DSP_0_RSTB"
+    },
+    "RSTC": {
+     "wire": "DSP_0_RSTC"
+    },
+    "RSTM": {
+     "wire": "DSP_0_RSTM"
+    },
+    "RSTP": {
+     "wire": "DSP_0_RSTP"
+    },
+    "UNDERFLOW": {
+     "wire": "DSP_0_UNDERFLOW"
+    }
+   },
+   "type": "DSP48E1",
+   "x_coord": 0,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "A0": {
+     "wire": "DSP_1_A0"
+    },
+    "A1": {
+     "wire": "DSP_1_A1"
+    },
+    "A2": {
+     "wire": "DSP_1_A2"
+    },
+    "ALUMODE0": {
+     "wire": "DSP_1_ALUMODE0"
+    },
+    "ALUMODE1": {
+     "wire": "DSP_1_ALUMODE1"
+    },
+    "ALUMODE2": {
+     "wire": "DSP_1_ALUMODE2"
+    },
+    "ALUMODE3": {
+     "wire": "DSP_1_ALUMODE3"
+    },
+    "B0": {
+     "wire": "DSP_1_B0"
+    },
+    "B1": {
+     "wire": "DSP_1_B1"
+    },
+    "B2": {
+     "wire": "DSP_1_B2"
+    },
+    "C0": {
+     "wire": "DSP_1_C0"
+    },
+    "C1": {
+     "wire": "DSP_1_C1"
+    },
+    "C2": {
+     "wire": "DSP_1_C2"
+    },
+    "CARRYIN": {
+     "wire": "DSP_1_CARRYIN"
+    },
+    "CARRYOUT0": {
+     "wire": "DSP_1_CARRYOUT0"
+    },
+    "CARRYOUT1": {
+     "wire": "DSP_1_CARRYOUT1"
+    },
+    "CARRYOUT2": {
+     "wire": "DSP_1_CARRYOUT2"
+    },
+    "CARRYOUT3": {
+     "wire": "DSP_1_CARRYOUT3"
+    },
+    "CEA1": {
+     "wire": "DSP_1_CEA1"
+    },
+    "CEA2": {
+     "wire": "DSP_1_CEA2"
+    },
+    "CEB1": {
+     "wire": "DSP_1_CEB1"
+    },
+    "CEB2": {
+     "wire": "DSP_1_CEB2"
+    },
+    "CEC": {
+     "wire": "DSP_1_CEC"
+    },
+    "CEM": {
+     "wire": "DSP_1_CEM"
+    },
+    "CEP": {
+     "wire": "DSP_1_CEP"
+    },
+    "CLK": {
+     "wire": "DSP_1_CLK"
+    },
+    "D0": {
+     "wire": "DSP_1_D0"
+    },
+    "D1": {
+     "wire": "DSP_1_D1"
+    },
+    "D2": {
+     "wire": "DSP_1_D2"
+    },
+    "INMODE0": {
+     "wire": "DSP_1_INMODE0"
+    },
+    "INMODE1": {
+     "wire": "DSP_1_INMODE1"
+    },
+    "INMODE2": {
+     "wire": "DSP_1_INMODE2"
+    },
+    "INMODE3": {
+     "wire": "DSP_1_INMODE3"
+    },
+    "INMODE4": {
+     "wire": "DSP_1_INMODE4"
+    },
+    "MULTSIGNOUT": {
+     "wire": "DSP_1_MULTSIGNOUT"
+    },
+    "OPMODE0": {
+     "wire": "DSP_1_OPMODE0"
+    },
+    "OPMODE1": {
+     "wire": "DSP_1_OPMODE1"
+    },
+    "OPMODE2": {
+     "wire": "DSP_1_OPMODE2"
+    },
+    "OPMODE3": {
+     "wire": "DSP_1_OPMODE3"
+    },
+    "OPMODE4": {
+     "wire": "DSP_1_OPMODE4"
+    },
+    "OPMODE5": {
+     "wire": "DSP_1_OPMODE5"
+    },
+    "OPMODE6": {
+     "wire": "DSP_1_OPMODE6"
+    },
+    "OVERFLOW": {
+     "wire": "DSP_1_OVERFLOW"
+    },
+    "P0": {
+     "wire": "DSP_1_P0"
+    },
+    "P1": {
+     "wire": "DSP_1_P1"
+    },
+    "P2": {
+     "wire": "DSP_1_P2"
+    },
+    "PATTERNDETECT": {
+     "wire": "DSP_1_PATTERNDETECT"
+    },
+    "RSTA": {
+     "wire": "DSP_1_RSTA"
+    },
+    "RSTB": {
+     "wire": "DSP_1_RSTB"
+    },
+    "RSTC": {
+     "wire": "DSP_1_RSTC"
+    },
+    "RSTM": {
+     "wire": "DSP_1_RSTM"
+    },
+    "RSTP": {
+     "wire": "DSP_1_RSTP"
+    },
+    "UNDERFLOW": {
+     "wire": "DSP_1_UNDERFLOW"
+    }
+   },
+   "type": "DSP48E1",
+   "x_coord": 1,
+   "y_coord": 0
+  }
+ ],
+ "tile_type": "TESTDSP",
+ "wires": {
+  "DSP_0_A0": null,
+  "DSP_0_A1": null,
+  "DSP_0_A2": null,
+  "DSP_0_ALUMODE0": null,
+  "DSP_0_ALUMODE1": null,
+  "DSP_0_ALUMODE2": null,
+  "DSP_0_ALUMODE3": null,
+  "DSP_0_B0": null,
+  "DSP_0_B1": null,
+  "DSP_0_B2": null,
+  "DSP_0_C0": null,
+  "DSP_0_C1": null,
+  "DSP_0_C2": null,
+  "DSP_0_CARRYIN": null,
+  "DSP_0_CARRYOUT0": null,
+  "DSP_0_CARRYOUT1": null,
+  "DSP_0_CARRYOUT2": null,
+  "DSP_0_CARRYOUT3": null,
+  "DSP_0_CEA1": null,
+  "DSP_0_CEA2": null,
+  "DSP_0_CEB1": null,
+  "DSP_0_CEB2": null,
+  "DSP_0_CEC": null,
+  "DSP_0_CEM": null,
+  "DSP_0_CEP": null,
+  "DSP_0_CLK": null,
+  "DSP_0_D0": null,
+  "DSP_0_D1": null,
+  "DSP_0_D2": null,
+  "DSP_0_INMODE0": null,
+  "DSP_0_INMODE1": null,
+  "DSP_0_INMODE2": null,
+  "DSP_0_INMODE3": null,
+  "DSP_0_INMODE4": null,
+  "DSP_0_MULTSIGNOUT": null,
+  "DSP_0_OPMODE0": null,
+  "DSP_0_OPMODE1": null,
+  "DSP_0_OPMODE2": null,
+  "DSP_0_OPMODE3": null,
+  "DSP_0_OPMODE4": null,
+  "DSP_0_OPMODE5": null,
+  "DSP_0_OPMODE6": null,
+  "DSP_0_OVERFLOW": null,
+  "DSP_0_P0": null,
+  "DSP_0_P1": null,
+  "DSP_0_P2": null,
+  "DSP_0_PATTERNDETECT": null,
+  "DSP_0_RSTA": null,
+  "DSP_0_RSTB": null,
+  "DSP_0_RSTC": null,
+  "DSP_0_RSTM": null,
+  "DSP_0_RSTP": null,
+  "DSP_0_UNDERFLOW": null,
+  "DSP_1_A0": null,
+  "DSP_1_A1": null,
+  "DSP_1_A2": null,
+  "DSP_1_ALUMODE0": null,
+  "DSP_1_ALUMODE1": null,
+  "DSP_1_ALUMODE2": null,
+  "DSP_1_ALUMODE3": null,
+  "DSP_1_B0": null,
+  "DSP_1_B1": null,
+  "DSP_1_B2": null,
+  "DSP_1_C0": null,
+  "DSP_1_C1": null,
+  "DSP_1_C2": null,
+  "DSP_1_CARRYIN": null,
+  "DSP_1_CARRYOUT0": null,
+  "DSP_1_CARRYOUT1": null,
+  "DSP_1_CARRYOUT2": null,
+  "DSP_1_CARRYOUT3": null,
+  "DSP_1_CEA1": null,
+  "DSP_1_CEA2": null,
+  "DSP_1_CEB1": null,
+  "DSP_1_CEB2": null,
+  "DSP_1_CEC": null,
+  "DSP_1_CEM": null,
+  "DSP_1_CEP": null,
+  "DSP_1_CLK": null,
+  "DSP_1_D0": null,
+  "DSP_1_D1": null,
+  "DSP_1_D2": null,
+  "DSP_1_INMODE0": null,
+  "DSP_1_INMODE1": null,
+  "DSP_1_INMODE2": null,
+  "DSP_1_INMODE3": null,
+  "DSP_1_INMODE4": null,
+  "DSP_1_MULTSIGNOUT": null,
+  "DSP_1_OPMODE0": null,
+  "DSP_1_OPMODE1": null,
+  "DSP_1_OPMODE2": null,
+  "DSP_1_OPMODE3": null,
+  "DSP_1_OPMODE4": null,
+  "DSP_1_OPMODE5": null,
+  "DSP_1_OPMODE6": null,
+  "DSP_1_OVERFLOW": null,
+  "DSP_1_P0": null,
+  "DSP_1_P1": null,
+  "DSP_1_P2": null,
+  "DSP_1_PATTERNDETECT": null,
+  "DSP_1_RSTA": null,
+  "DSP_1_RSTB": null,
+  "DSP_1_RSTC": null,
+  "DSP_1_RSTM": null,
+  "DSP_1_RSTP": null,
+  "DSP_1_UNDERFLOW": null
+ }
+}

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -34,8 +35,15 @@ const char *to_string(Result r)
 Result run_solver(const Solver &solver, const std::string &text)
 {
     namespace fs = std::filesystem;
+    // pid plus a counter, not rand(): rand() is never seeded, so it yields the
+    // same sequence every run and two concurrent runs in one temp directory
+    // would collide on the first question, the second overwriting the first's
+    // file while it was being read.  A counter cannot repeat within a process,
+    // and the pid separates processes.
+    static std::atomic<unsigned> seq{0};
     fs::path path = fs::temp_directory_path() /
-                    ("lvs_miter_" + std::to_string(::getpid()) + "_" + std::to_string(rand()) +
+                    ("lvs_miter_" + std::to_string(::getpid()) + "_" +
+                     std::to_string(seq.fetch_add(1)) +
                      (solver.format == Format::Dimacs ? ".cnf" : ".smt2"));
     {
         std::ofstream out(path);

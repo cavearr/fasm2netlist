@@ -1,0 +1,836 @@
+{
+ "pips": {},
+ "sites": [
+  {
+   "site_pins": {
+    "A": {
+     "wire": "S0_A"
+    },
+    "A1": {
+     "wire": "S0_A1"
+    },
+    "A2": {
+     "wire": "S0_A2"
+    },
+    "A3": {
+     "wire": "S0_A3"
+    },
+    "A4": {
+     "wire": "S0_A4"
+    },
+    "A5": {
+     "wire": "S0_A5"
+    },
+    "A6": {
+     "wire": "S0_A6"
+    },
+    "AI": {
+     "wire": "S0_AI"
+    },
+    "AMUX": {
+     "wire": "S0_AMUX"
+    },
+    "AQ": {
+     "wire": "S0_AQ"
+    },
+    "AX": {
+     "wire": "S0_AX"
+    },
+    "B": {
+     "wire": "S0_B"
+    },
+    "B1": {
+     "wire": "S0_B1"
+    },
+    "B2": {
+     "wire": "S0_B2"
+    },
+    "B3": {
+     "wire": "S0_B3"
+    },
+    "B4": {
+     "wire": "S0_B4"
+    },
+    "B5": {
+     "wire": "S0_B5"
+    },
+    "B6": {
+     "wire": "S0_B6"
+    },
+    "BI": {
+     "wire": "S0_BI"
+    },
+    "BMUX": {
+     "wire": "S0_BMUX"
+    },
+    "BQ": {
+     "wire": "S0_BQ"
+    },
+    "BX": {
+     "wire": "S0_BX"
+    },
+    "C": {
+     "wire": "S0_C"
+    },
+    "C1": {
+     "wire": "S0_C1"
+    },
+    "C2": {
+     "wire": "S0_C2"
+    },
+    "C3": {
+     "wire": "S0_C3"
+    },
+    "C4": {
+     "wire": "S0_C4"
+    },
+    "C5": {
+     "wire": "S0_C5"
+    },
+    "C6": {
+     "wire": "S0_C6"
+    },
+    "CE": {
+     "wire": "S0_CE"
+    },
+    "CI": {
+     "wire": "S0_CI"
+    },
+    "CIN": {
+     "wire": "S0_CIN"
+    },
+    "CLK": {
+     "wire": "S0_CLK"
+    },
+    "CMUX": {
+     "wire": "S0_CMUX"
+    },
+    "COUT": {
+     "wire": "S0_COUT"
+    },
+    "CQ": {
+     "wire": "S0_CQ"
+    },
+    "CX": {
+     "wire": "S0_CX"
+    },
+    "D": {
+     "wire": "S0_D"
+    },
+    "D1": {
+     "wire": "S0_D1"
+    },
+    "D2": {
+     "wire": "S0_D2"
+    },
+    "D3": {
+     "wire": "S0_D3"
+    },
+    "D4": {
+     "wire": "S0_D4"
+    },
+    "D5": {
+     "wire": "S0_D5"
+    },
+    "D6": {
+     "wire": "S0_D6"
+    },
+    "DI": {
+     "wire": "S0_DI"
+    },
+    "DMUX": {
+     "wire": "S0_DMUX"
+    },
+    "DQ": {
+     "wire": "S0_DQ"
+    },
+    "DX": {
+     "wire": "S0_DX"
+    },
+    "SR": {
+     "wire": "S0_SR"
+    },
+    "WE": {
+     "wire": "S0_WE"
+    }
+   },
+   "type": "SLICEM",
+   "x_coord": 0,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "A": {
+     "wire": "S1_A"
+    },
+    "A1": {
+     "wire": "S1_A1"
+    },
+    "A2": {
+     "wire": "S1_A2"
+    },
+    "A3": {
+     "wire": "S1_A3"
+    },
+    "A4": {
+     "wire": "S1_A4"
+    },
+    "A5": {
+     "wire": "S1_A5"
+    },
+    "A6": {
+     "wire": "S1_A6"
+    },
+    "AI": {
+     "wire": "S1_AI"
+    },
+    "AMUX": {
+     "wire": "S1_AMUX"
+    },
+    "AQ": {
+     "wire": "S1_AQ"
+    },
+    "AX": {
+     "wire": "S1_AX"
+    },
+    "B": {
+     "wire": "S1_B"
+    },
+    "B1": {
+     "wire": "S1_B1"
+    },
+    "B2": {
+     "wire": "S1_B2"
+    },
+    "B3": {
+     "wire": "S1_B3"
+    },
+    "B4": {
+     "wire": "S1_B4"
+    },
+    "B5": {
+     "wire": "S1_B5"
+    },
+    "B6": {
+     "wire": "S1_B6"
+    },
+    "BI": {
+     "wire": "S1_BI"
+    },
+    "BMUX": {
+     "wire": "S1_BMUX"
+    },
+    "BQ": {
+     "wire": "S1_BQ"
+    },
+    "BX": {
+     "wire": "S1_BX"
+    },
+    "C": {
+     "wire": "S1_C"
+    },
+    "C1": {
+     "wire": "S1_C1"
+    },
+    "C2": {
+     "wire": "S1_C2"
+    },
+    "C3": {
+     "wire": "S1_C3"
+    },
+    "C4": {
+     "wire": "S1_C4"
+    },
+    "C5": {
+     "wire": "S1_C5"
+    },
+    "C6": {
+     "wire": "S1_C6"
+    },
+    "CE": {
+     "wire": "S1_CE"
+    },
+    "CI": {
+     "wire": "S1_CI"
+    },
+    "CIN": {
+     "wire": "S1_CIN"
+    },
+    "CLK": {
+     "wire": "S1_CLK"
+    },
+    "CMUX": {
+     "wire": "S1_CMUX"
+    },
+    "COUT": {
+     "wire": "S1_COUT"
+    },
+    "CQ": {
+     "wire": "S1_CQ"
+    },
+    "CX": {
+     "wire": "S1_CX"
+    },
+    "D": {
+     "wire": "S1_D"
+    },
+    "D1": {
+     "wire": "S1_D1"
+    },
+    "D2": {
+     "wire": "S1_D2"
+    },
+    "D3": {
+     "wire": "S1_D3"
+    },
+    "D4": {
+     "wire": "S1_D4"
+    },
+    "D5": {
+     "wire": "S1_D5"
+    },
+    "D6": {
+     "wire": "S1_D6"
+    },
+    "DI": {
+     "wire": "S1_DI"
+    },
+    "DMUX": {
+     "wire": "S1_DMUX"
+    },
+    "DQ": {
+     "wire": "S1_DQ"
+    },
+    "DX": {
+     "wire": "S1_DX"
+    },
+    "SR": {
+     "wire": "S1_SR"
+    },
+    "WE": {
+     "wire": "S1_WE"
+    }
+   },
+   "type": "SLICEM",
+   "x_coord": 1,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "A": {
+     "wire": "S2_A"
+    },
+    "A1": {
+     "wire": "S2_A1"
+    },
+    "A2": {
+     "wire": "S2_A2"
+    },
+    "A3": {
+     "wire": "S2_A3"
+    },
+    "A4": {
+     "wire": "S2_A4"
+    },
+    "A5": {
+     "wire": "S2_A5"
+    },
+    "A6": {
+     "wire": "S2_A6"
+    },
+    "AI": {
+     "wire": "S2_AI"
+    },
+    "AMUX": {
+     "wire": "S2_AMUX"
+    },
+    "AQ": {
+     "wire": "S2_AQ"
+    },
+    "AX": {
+     "wire": "S2_AX"
+    },
+    "B": {
+     "wire": "S2_B"
+    },
+    "B1": {
+     "wire": "S2_B1"
+    },
+    "B2": {
+     "wire": "S2_B2"
+    },
+    "B3": {
+     "wire": "S2_B3"
+    },
+    "B4": {
+     "wire": "S2_B4"
+    },
+    "B5": {
+     "wire": "S2_B5"
+    },
+    "B6": {
+     "wire": "S2_B6"
+    },
+    "BI": {
+     "wire": "S2_BI"
+    },
+    "BMUX": {
+     "wire": "S2_BMUX"
+    },
+    "BQ": {
+     "wire": "S2_BQ"
+    },
+    "BX": {
+     "wire": "S2_BX"
+    },
+    "C": {
+     "wire": "S2_C"
+    },
+    "C1": {
+     "wire": "S2_C1"
+    },
+    "C2": {
+     "wire": "S2_C2"
+    },
+    "C3": {
+     "wire": "S2_C3"
+    },
+    "C4": {
+     "wire": "S2_C4"
+    },
+    "C5": {
+     "wire": "S2_C5"
+    },
+    "C6": {
+     "wire": "S2_C6"
+    },
+    "CE": {
+     "wire": "S2_CE"
+    },
+    "CI": {
+     "wire": "S2_CI"
+    },
+    "CIN": {
+     "wire": "S2_CIN"
+    },
+    "CLK": {
+     "wire": "S2_CLK"
+    },
+    "CMUX": {
+     "wire": "S2_CMUX"
+    },
+    "COUT": {
+     "wire": "S2_COUT"
+    },
+    "CQ": {
+     "wire": "S2_CQ"
+    },
+    "CX": {
+     "wire": "S2_CX"
+    },
+    "D": {
+     "wire": "S2_D"
+    },
+    "D1": {
+     "wire": "S2_D1"
+    },
+    "D2": {
+     "wire": "S2_D2"
+    },
+    "D3": {
+     "wire": "S2_D3"
+    },
+    "D4": {
+     "wire": "S2_D4"
+    },
+    "D5": {
+     "wire": "S2_D5"
+    },
+    "D6": {
+     "wire": "S2_D6"
+    },
+    "DI": {
+     "wire": "S2_DI"
+    },
+    "DMUX": {
+     "wire": "S2_DMUX"
+    },
+    "DQ": {
+     "wire": "S2_DQ"
+    },
+    "DX": {
+     "wire": "S2_DX"
+    },
+    "SR": {
+     "wire": "S2_SR"
+    },
+    "WE": {
+     "wire": "S2_WE"
+    }
+   },
+   "type": "SLICEM",
+   "x_coord": 2,
+   "y_coord": 0
+  },
+  {
+   "site_pins": {
+    "A": {
+     "wire": "S3_A"
+    },
+    "A1": {
+     "wire": "S3_A1"
+    },
+    "A2": {
+     "wire": "S3_A2"
+    },
+    "A3": {
+     "wire": "S3_A3"
+    },
+    "A4": {
+     "wire": "S3_A4"
+    },
+    "A5": {
+     "wire": "S3_A5"
+    },
+    "A6": {
+     "wire": "S3_A6"
+    },
+    "AI": {
+     "wire": "S3_AI"
+    },
+    "AMUX": {
+     "wire": "S3_AMUX"
+    },
+    "AQ": {
+     "wire": "S3_AQ"
+    },
+    "AX": {
+     "wire": "S3_AX"
+    },
+    "B": {
+     "wire": "S3_B"
+    },
+    "B1": {
+     "wire": "S3_B1"
+    },
+    "B2": {
+     "wire": "S3_B2"
+    },
+    "B3": {
+     "wire": "S3_B3"
+    },
+    "B4": {
+     "wire": "S3_B4"
+    },
+    "B5": {
+     "wire": "S3_B5"
+    },
+    "B6": {
+     "wire": "S3_B6"
+    },
+    "BI": {
+     "wire": "S3_BI"
+    },
+    "BMUX": {
+     "wire": "S3_BMUX"
+    },
+    "BQ": {
+     "wire": "S3_BQ"
+    },
+    "BX": {
+     "wire": "S3_BX"
+    },
+    "C": {
+     "wire": "S3_C"
+    },
+    "C1": {
+     "wire": "S3_C1"
+    },
+    "C2": {
+     "wire": "S3_C2"
+    },
+    "C3": {
+     "wire": "S3_C3"
+    },
+    "C4": {
+     "wire": "S3_C4"
+    },
+    "C5": {
+     "wire": "S3_C5"
+    },
+    "C6": {
+     "wire": "S3_C6"
+    },
+    "CE": {
+     "wire": "S3_CE"
+    },
+    "CI": {
+     "wire": "S3_CI"
+    },
+    "CIN": {
+     "wire": "S3_CIN"
+    },
+    "CLK": {
+     "wire": "S3_CLK"
+    },
+    "CMUX": {
+     "wire": "S3_CMUX"
+    },
+    "COUT": {
+     "wire": "S3_COUT"
+    },
+    "CQ": {
+     "wire": "S3_CQ"
+    },
+    "CX": {
+     "wire": "S3_CX"
+    },
+    "D": {
+     "wire": "S3_D"
+    },
+    "D1": {
+     "wire": "S3_D1"
+    },
+    "D2": {
+     "wire": "S3_D2"
+    },
+    "D3": {
+     "wire": "S3_D3"
+    },
+    "D4": {
+     "wire": "S3_D4"
+    },
+    "D5": {
+     "wire": "S3_D5"
+    },
+    "D6": {
+     "wire": "S3_D6"
+    },
+    "DI": {
+     "wire": "S3_DI"
+    },
+    "DMUX": {
+     "wire": "S3_DMUX"
+    },
+    "DQ": {
+     "wire": "S3_DQ"
+    },
+    "DX": {
+     "wire": "S3_DX"
+    },
+    "SR": {
+     "wire": "S3_SR"
+    },
+    "WE": {
+     "wire": "S3_WE"
+    }
+   },
+   "type": "SLICEM",
+   "x_coord": 3,
+   "y_coord": 0
+  }
+ ],
+ "tile_type": "TESTCLBM",
+ "wires": {
+  "S0_A": null,
+  "S0_A1": null,
+  "S0_A2": null,
+  "S0_A3": null,
+  "S0_A4": null,
+  "S0_A5": null,
+  "S0_A6": null,
+  "S0_AI": null,
+  "S0_AMUX": null,
+  "S0_AQ": null,
+  "S0_AX": null,
+  "S0_B": null,
+  "S0_B1": null,
+  "S0_B2": null,
+  "S0_B3": null,
+  "S0_B4": null,
+  "S0_B5": null,
+  "S0_B6": null,
+  "S0_BI": null,
+  "S0_BMUX": null,
+  "S0_BQ": null,
+  "S0_BX": null,
+  "S0_C": null,
+  "S0_C1": null,
+  "S0_C2": null,
+  "S0_C3": null,
+  "S0_C4": null,
+  "S0_C5": null,
+  "S0_C6": null,
+  "S0_CE": null,
+  "S0_CI": null,
+  "S0_CIN": null,
+  "S0_CLK": null,
+  "S0_CMUX": null,
+  "S0_COUT": null,
+  "S0_CQ": null,
+  "S0_CX": null,
+  "S0_D": null,
+  "S0_D1": null,
+  "S0_D2": null,
+  "S0_D3": null,
+  "S0_D4": null,
+  "S0_D5": null,
+  "S0_D6": null,
+  "S0_DI": null,
+  "S0_DMUX": null,
+  "S0_DQ": null,
+  "S0_DX": null,
+  "S0_SR": null,
+  "S0_WE": null,
+  "S1_A": null,
+  "S1_A1": null,
+  "S1_A2": null,
+  "S1_A3": null,
+  "S1_A4": null,
+  "S1_A5": null,
+  "S1_A6": null,
+  "S1_AI": null,
+  "S1_AMUX": null,
+  "S1_AQ": null,
+  "S1_AX": null,
+  "S1_B": null,
+  "S1_B1": null,
+  "S1_B2": null,
+  "S1_B3": null,
+  "S1_B4": null,
+  "S1_B5": null,
+  "S1_B6": null,
+  "S1_BI": null,
+  "S1_BMUX": null,
+  "S1_BQ": null,
+  "S1_BX": null,
+  "S1_C": null,
+  "S1_C1": null,
+  "S1_C2": null,
+  "S1_C3": null,
+  "S1_C4": null,
+  "S1_C5": null,
+  "S1_C6": null,
+  "S1_CE": null,
+  "S1_CI": null,
+  "S1_CIN": null,
+  "S1_CLK": null,
+  "S1_CMUX": null,
+  "S1_COUT": null,
+  "S1_CQ": null,
+  "S1_CX": null,
+  "S1_D": null,
+  "S1_D1": null,
+  "S1_D2": null,
+  "S1_D3": null,
+  "S1_D4": null,
+  "S1_D5": null,
+  "S1_D6": null,
+  "S1_DI": null,
+  "S1_DMUX": null,
+  "S1_DQ": null,
+  "S1_DX": null,
+  "S1_SR": null,
+  "S1_WE": null,
+  "S2_A": null,
+  "S2_A1": null,
+  "S2_A2": null,
+  "S2_A3": null,
+  "S2_A4": null,
+  "S2_A5": null,
+  "S2_A6": null,
+  "S2_AI": null,
+  "S2_AMUX": null,
+  "S2_AQ": null,
+  "S2_AX": null,
+  "S2_B": null,
+  "S2_B1": null,
+  "S2_B2": null,
+  "S2_B3": null,
+  "S2_B4": null,
+  "S2_B5": null,
+  "S2_B6": null,
+  "S2_BI": null,
+  "S2_BMUX": null,
+  "S2_BQ": null,
+  "S2_BX": null,
+  "S2_C": null,
+  "S2_C1": null,
+  "S2_C2": null,
+  "S2_C3": null,
+  "S2_C4": null,
+  "S2_C5": null,
+  "S2_C6": null,
+  "S2_CE": null,
+  "S2_CI": null,
+  "S2_CIN": null,
+  "S2_CLK": null,
+  "S2_CMUX": null,
+  "S2_COUT": null,
+  "S2_CQ": null,
+  "S2_CX": null,
+  "S2_D": null,
+  "S2_D1": null,
+  "S2_D2": null,
+  "S2_D3": null,
+  "S2_D4": null,
+  "S2_D5": null,
+  "S2_D6": null,
+  "S2_DI": null,
+  "S2_DMUX": null,
+  "S2_DQ": null,
+  "S2_DX": null,
+  "S2_SR": null,
+  "S2_WE": null,
+  "S3_A": null,
+  "S3_A1": null,
+  "S3_A2": null,
+  "S3_A3": null,
+  "S3_A4": null,
+  "S3_A5": null,
+  "S3_A6": null,
+  "S3_AI": null,
+  "S3_AMUX": null,
+  "S3_AQ": null,
+  "S3_AX": null,
+  "S3_B": null,
+  "S3_B1": null,
+  "S3_B2": null,
+  "S3_B3": null,
+  "S3_B4": null,
+  "S3_B5": null,
+  "S3_B6": null,
+  "S3_BI": null,
+  "S3_BMUX": null,
+  "S3_BQ": null,
+  "S3_BX": null,
+  "S3_C": null,
+  "S3_C1": null,
+  "S3_C2": null,
+  "S3_C3": null,
+  "S3_C4": null,
+  "S3_C5": null,
+  "S3_C6": null,
+  "S3_CE": null,
+  "S3_CI": null,
+  "S3_CIN": null,
+  "S3_CLK": null,
+  "S3_CMUX": null,
+  "S3_COUT": null,
+  "S3_CQ": null,
+  "S3_CX": null,
+  "S3_D": null,
+  "S3_D1": null,
+  "S3_D2": null,
+  "S3_D3": null,
+  "S3_D4": null,
+  "S3_D5": null,
+  "S3_D6": null,
+  "S3_DI": null,
+  "S3_DMUX": null,
+  "S3_DQ": null,
+  "S3_DX": null,
+  "S3_SR": null,
+  "S3_WE": null
+ }
+}
