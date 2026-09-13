@@ -279,8 +279,40 @@ DesignConfig read_fasm(const std::string &path)
         if (col_ok && tail.rfind("LUT.INIT", 0) == 0) {
             ColumnConfig &cc = column(c);
             cc.lut_used = true;
-            cc.init = parse_bits(value);
-            if (!cc.init) sc.unhandled.push_back(rest + " = " + value);
+            // prjxray writes the MINIMAL form of a multi-bit feature: the full
+            // vector when it needs it, a trimmed range when the high bits are
+            // zero, and a BARE FEATURE with no value at all when only one bit
+            // is set:
+            //     ALUT.INIT[63:0] = 64'b1111...
+            //     ALUT.INIT[62:0] = 63'b1010...
+            //     DLUT.INIT[54]
+            // openXC7's writer always emits [63:0], so accepting only that was
+            // enough until now.  A Vivado bitstream uses all three, and the
+            // decoder reported 245 LUT features as "not modelled" -- which is
+            // the dangerous kind of gap, because an unmodelled INIT bit is a
+            // LUT whose extracted logic is quietly wrong rather than missing.
+            //
+            // Accept any [hi:lo] or [n], shift into place, and OR: several
+            // bare bits can describe one LUT, and assigning would keep only
+            // the last.
+            size_t lb = tail.find('['), rb = tail.find(']');
+            unsigned lo = 0;
+            if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+                std::string idx = tail.substr(lb + 1, rb - lb - 1);
+                size_t colon = idx.find(':');
+                try {
+                    lo = unsigned(std::stoul(colon == std::string::npos
+                                             ? idx : idx.substr(colon + 1)));
+                } catch (...) { lo = 0; }
+            }
+            std::optional<uint64_t> bits =
+                value.empty() ? std::optional<uint64_t>(1) : parse_bits(value);
+            if (bits && lo < 64) {
+                if (!cc.init) cc.init = 0;
+                *cc.init |= (*bits) << lo;
+            } else {
+                sc.unhandled.push_back(rest + (value.empty() ? "" : " = " + value));
+            }
         } else if (col_ok && tail == "FF.ZINI") { column(c).ff_init = 0; column(c).ff_used = true;
         } else if (col_ok && tail == "FF.ZRST") { column(c).ff_srval = 0; column(c).ff_used = true;
         } else if (col_ok && tail == "5FF.ZINI") { column(c).ff5_init = 0; column(c).ff5_used = true;

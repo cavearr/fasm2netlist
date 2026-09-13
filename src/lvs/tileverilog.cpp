@@ -1458,20 +1458,30 @@ endmodule
         rail[root] = v;
     }
 
+    // Which roots reach a pad, computed ONCE.
+    //
+    // The two loops below used to ask this per (root, endpoint) pair, which
+    // is |roots| x |io_endpoints| calls to dsu.find -- and find walks a
+    // std::map keyed by strings, compressing the path as it goes, so every
+    // call is many string comparisons rather than an array step.  On the
+    // examples that is invisible.  On a Vivado bitstream's fabric, where
+    // roots runs to tens of thousands, it is the difference between seconds
+    // and not finishing: the extractor sat at 100% CPU here with the hard
+    // blocks already cut and fabric.v still empty.
+    std::set<std::string> io_roots;
+    for (const auto &e : io_endpoints) io_roots.insert(dsu.find(e));
+
     std::vector<std::string> ports, outs, tied;
     for (const auto &r : roots) {
         std::string n = sanitise(r);
         bool clock = (!clock_root.empty() && r == clock_root);
         if (driven.count(n) && !clock) {
             // driven inside the fabric: only interesting if it reaches a pad
-            for (const auto &e : io_endpoints)
-                if (dsu.find(e) == r) { outs.push_back(n); break; }
+            if (io_roots.count(r)) outs.push_back(n);
             continue;
         }
         bool is_port = (!clock_root.empty() && r == clock_root);
-        if (!is_port)
-            for (const auto &e : io_endpoints)
-                if (dsu.find(e) == r) { is_port = true; break; }
+        if (!is_port) is_port = io_roots.count(r) != 0;
         for (const auto &pat : input_pats)
             if (r.find(pat) != std::string::npos) { is_port = true; break; }
         (is_port ? ports : tied).push_back(n);
