@@ -833,6 +833,59 @@ int main(int argc, char **argv)
                         }
                         continue;
                     }
+                    // A wide SERDES is cut at its boundary and instantiated as
+                    // the primitive, exactly as a DDR register is: the outputs
+                    // become free variables and the parallel inputs the
+                    // obligations, and the synthesis carries the same
+                    // OSERDESE2/ISERDESE2 with the same port names so the two
+                    // cuts cancel.  (No SHIFTIN/SHIFTOUT cascade appears in any
+                    // design here, so each is one cell with one boundary.)  An
+                    // OSERDESE2 lives in the OLOGIC, an ISERDESE2 in the ILOGIC;
+                    // IDELAY (kind 2) is a wire and handled below.
+                    if (cfg != dc.iologic.end() && cfg->second.serdes_wide &&
+                        (kind == 0 || kind == 1)) {
+                        const bool in = (kind == 0);
+                        // primitive port -> site pin.  RST arrives on the
+                        // shared SR pin; the ISERDES data input takes the
+                        // delayed tap when the mux says so, as an IDDR's does.
+                        static const char *oser_ports[][2] = {
+                            {"OQ", "OQ"}, {"TQ", "TQ"}, {"D1", "D1"}, {"D2", "D2"},
+                            {"D3", "D3"}, {"D4", "D4"}, {"D5", "D5"}, {"D6", "D6"},
+                            {"D7", "D7"}, {"D8", "D8"}, {"T1", "T1"}, {"T2", "T2"},
+                            {"T3", "T3"}, {"T4", "T4"}, {"OCE", "OCE"}, {"TCE", "TCE"},
+                            {"CLK", "CLK"}, {"CLKDIV", "CLKDIV"}, {"RST", "SR"},
+                            {nullptr, nullptr}};
+                        static const char *iser_ports[][2] = {
+                            {"O", "O"}, {"Q1", "Q1"}, {"Q2", "Q2"}, {"Q3", "Q3"},
+                            {"Q4", "Q4"}, {"Q5", "Q5"}, {"Q6", "Q6"}, {"Q7", "Q7"},
+                            {"Q8", "Q8"}, {"D", "D"}, {"CE1", "CE1"}, {"CE2", "CE2"},
+                            {"CLK", "CLK"}, {"CLKB", "CLKB"}, {"CLKDIV", "CLKDIV"},
+                            {"RST", "SR"}, {"BITSLIP", "BITSLIP"}, {nullptr, nullptr}};
+                        DdrSite ds;
+                        ds.tile = tkv.first;
+                        ds.site = tag + "_Y" + idx;
+                        ds.prim = in ? "ISERDESE2" : "OSERDESE2";
+                        ds.iname = tkv.first + "_" + ds.site;
+                        for (auto pp = in ? iser_ports : oser_ports; (*pp)[0]; pp++) {
+                            const char *port = (*pp)[0];
+                            std::string sitepin = (*pp)[1];
+                            if (in && sitepin == "D" && cfg->second.delayed_input)
+                                sitepin = "DDLY";
+                            auto q = pins.find(sitepin);
+                            if (q == pins.end()) continue;
+                            ds.ports.push_back({port, q->second});
+                        }
+                        // The site drives its outputs, so the bypass pseudo-PIP
+                        // must not: OSERDESE2 drives OQ/TQ, ISERDESE2 O/Q1..Q8.
+                        for (const auto &pr : ds.ports)
+                            if (pr.first == "OQ" || pr.first == "TQ" ||
+                                pr.first == "O" || pr.first.rfind("Q", 0) == 0) {
+                                already.insert(tw(tkv.first, pr.second));
+                                ddr_driven.insert(tw(tkv.first, pr.second));
+                            }
+                        ddr_sites.push_back(std::move(ds));
+                        continue;
+                    }
                     if (cfg != dc.iologic.end() && !cfg->second.is_bypass()) {
                         unmodelled_io++;
                         continue;
@@ -1393,8 +1446,11 @@ endmodule
         for (const auto &pr : d.ports) {
             std::string raw = tw(d.tile, pr.second);
             // Outputs are driven by this instance and by nothing else, the same
-            // bookkeeping a block RAM's data outputs get.
-            if (pr.first == "Q" || pr.first.rfind("Q", 0) == 0)
+            // bookkeeping a block RAM's data outputs get.  A DDR register
+            // drives Q/Q1/Q2; a SERDES drives OQ/TQ (OSERDESE2) or O/Q1..Q8
+            // (ISERDESE2).  None of these primitives has an INPUT so named.
+            if (pr.first == "Q" || pr.first.rfind("Q", 0) == 0 ||
+                pr.first == "OQ" || pr.first == "TQ" || pr.first == "O")
                 driven_raw.insert(raw);
             o << (first ? "" : ", ") << "." << pr.first << "(" << emit_net(raw) << ")";
             first = false;

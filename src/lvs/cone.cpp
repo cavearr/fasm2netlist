@@ -65,6 +65,17 @@ const std::map<std::string, std::set<std::string>> OPAQUE_OUT = {
     {"PLLE2_BASE", {"LOCKED"}},
     {"IDDR", {"Q1", "Q2"}},
     {"ODDR", {"Q"}},
+    // A wide SERDES is cut at its boundary exactly as a DDR register is: its
+    // serialisation is a function of time this proof has no notion of, so the
+    // outputs become free variables and the parallel inputs (D1..D8, or the
+    // captured Q1..Q8) become the obligations.  The synthesis carries the same
+    // OSERDESE2/ISERDESE2 primitive with the same port names -- with no
+    // SHIFTIN/SHIFTOUT cascade in any design seen here, each is a single cell
+    // with a matching boundary -- so the two cuts cancel.  What is NOT checked
+    // is the clock, the phase, or the bitslip, the same gap every cut carries.
+    {"OSERDESE2", {"OQ", "TQ", "OFB", "TFB", "SHIFTOUT1", "SHIFTOUT2"}},
+    {"ISERDESE2", {"O", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "OFB",
+                   "SHIFTOUT1", "SHIFTOUT2"}},
 };
 bool is_opaque_out(const std::string &type, const std::string &pin)
 {

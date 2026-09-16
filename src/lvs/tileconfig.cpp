@@ -183,7 +183,13 @@ DesignConfig read_fasm(const std::string &path)
             // synthesis side, so mark it and let is_ddr_block() refuse rather
             // than emit an ODDR that is not what the silicon holds.
             else if (rest.rfind("OSERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            // An ISERDESE2 spells its width through the interface mode, not a
+            // DATA_WIDTH tag: NETWORKING.DDR.W8 for the 8:1 deserialiser LiteX
+            // uses on DDR read data.  Both this and ISERDES.IN_USE mark the
+            // site as a SERDES to be cut, not a wire.
             else if (rest.rfind("ISERDES.DATA_WIDTH.", 0) == 0) io.serdes_wide = true;
+            else if (rest.rfind("ISERDES.NETWORKING.", 0) == 0) io.serdes_wide = true;
+            else if (rest == "ISERDES.IN_USE") io.serdes_wide = true;
             // The rest configure a DDR register without changing which net
             // reaches which pin, which is all the boundary cut asserts: initial
             // and set/reset values, set/reset style, capture edge, the shared

@@ -278,6 +278,13 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         // in cone.cpp, which must cut exactly these.
         static const std::vector<const char *> kIddrOuts = {"Q1", "Q2"};
         static const std::vector<const char *> kOddrOuts = {"Q"};
+        // A wide SERDES is cut the same way, so its outputs need the same
+        // correspondence.  OSERDESE2 drives OQ (and TQ on a tristate); an
+        // ISERDESE2 presents the captured word on Q1..Q8 and its combinational
+        // tap on O.
+        static const std::vector<const char *> kOserdesOuts = {"OQ", "TQ"};
+        static const std::vector<const char *> kIserdesOuts = {"O",  "Q1", "Q2", "Q3",
+                                                               "Q4", "Q5", "Q6", "Q7", "Q8"};
         static const std::set<std::string> kHardBels = {
             "RAMB18E1", "RAMB36E1", "DSP48E1",  "MMCME2_ADV",    "PLLE2_ADV",
             // Enumerated from the synthesis, so the names here are the ones
@@ -292,6 +299,12 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
             // gets: without it the two sides carry the same primitive under
             // different names and the cuts cannot cancel.
             "IDDR", "ODDR",
+            // The wide SERDES an I/O site can hold instead of a plain DDR
+            // register.  LiteX drives every DDR-memory output through an
+            // OSERDESE2 and captures the read data through an ISERDESE2; cut at
+            // their boundary they pair like an ODDR, and without them every
+            // ddram_* port differs on the strength of an undriven pad.
+            "ISERDESE2", "OSERDESE2",
         };
         // Enumerated from the SYNTHESIS, not from the placement.  The
         // placement is written at the end of place-and-route, so a cell that
@@ -370,13 +383,18 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                         }
                     }
                 }
-            } else if (bel == "IDDR" || bel == "ODDR") {
+            } else if (bel == "IDDR" || bel == "ODDR" || bel == "ISERDESE2" ||
+                       bel == "OSERDESE2") {
+                // A SERDES sits in the same site as the DDR register it
+                // replaces: an ISERDESE2 in the ILOGIC, an OSERDESE2 in the
+                // OLOGIC, so the site lookup is identical.
+                const bool is_in = (bel == "IDDR" || bel == "ISERDESE2");
                 // The placement names the site as the device does,
                 // ILOGIC_X0Y11; the FASM and the tile model name it by its
                 // position within the tile, ILOGIC_Y1.  Enumerate the tile's
                 // sites of that kind and index them, exactly as the RAMB18
                 // halves above are, rather than parsing the Y and hoping.
-                const char *pfx = bel == "IDDR" ? "ILOGIC_" : "OLOGIC_";
+                const char *pfx = is_in ? "ILOGIC_" : "OLOGIC_";
                 const json::Value &tv = grid.get(tile);
                 std::string fasm_site;
                 if (!tv.isNull()) {
@@ -423,7 +441,12 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                     // side invents its own free variable for the same pin and
                     // everything the pad feeds differs on the strength of the
                     // name alone.
-                    for (const char *pin : (bel == "IDDR" ? kIddrOuts : kOddrOuts))
+                    const std::vector<const char *> &outs =
+                        bel == "IDDR"       ? kIddrOuts
+                        : bel == "ODDR"     ? kOddrOuts
+                        : bel == "ISERDESE2" ? kIserdesOuts
+                                            : kOserdesOuts;
+                    for (const char *pin : outs)
                         out.mem[hb.gate_name + ":" + pin + "[0]"] =
                             cv.first + ":" + pin + "[0]";
                 }
