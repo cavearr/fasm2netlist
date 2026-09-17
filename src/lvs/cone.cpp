@@ -88,6 +88,13 @@ bool is_opaque_out(const std::string &type, const std::string &pin)
 // which is exactly one SLICEM column, and is why the two sides can be matched
 // column for column.  The write address is port D's for both.
 const std::map<std::string, int> RAM_PORTS = {{"RAM64M", 1}, {"RAM32M", 2}};
+// The single-port ones, by address width: one column (32/64), a pair under
+// an F7 (128) or the whole slice under the F8 (256).  One data bit, read and
+// written at the same address, so the boundary is A, D and WE and the cut
+// is O.  The fabric side is the same shape: a column, or a GROUP of columns
+// the tile model marks and reads out on its mux (see xcol's DEPTH).
+const std::map<std::string, int> RAM_SINGLE = {
+    {"RAM32X1S", 5}, {"RAM64X1S", 6}, {"RAM128X1S", 7}, {"RAM256X1S", 8}};
 
 // The block RAMs.  Unlike a distributed RAM these are not modelled at all:
 // their data outputs are cut and every one of their inputs becomes an
@@ -309,6 +316,17 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             alias_[bit_name(a.lhs.name, a.lhs.index)] = bit_name(a.rhs.name, a.rhs.index);
 
     for (const auto &inst : m.instances) {
+        // A column of a deeper distributed RAM (xcol's DEPTH > 64): the
+        // group reads out on the mux named by GOUT, and that net is the cut.
+        // Registered here, with the other memory reads, because the
+        // register cones are built before the memory ports are collected
+        // and a cut placed after a cone has been memoised cuts nothing.
+        if (is_xcol(inst.type) && !memory_as_state_) {
+            std::string gout = param_str(inst, "GOUT", "");
+            std::string grp = param_str(inst, "GROUP", "");
+            if (!gout.empty() && !grp.empty())
+                mem_out_[gout] = mem_cut_name(grp, "O", 0);
+        }
         // A carry cell drives eight nets from two four-bit pins, so its
         // outputs are recorded bit by bit; everything else here drives one
         // net from one pin.
@@ -340,6 +358,7 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
                           (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
                           (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
+                          (RAM_SINGLE.count(inst.type) && pin.name == "O") ||
                           (is_bram(inst.type) && bram_data_out(pin.name)) ||
                           (is_dsp(inst.type) && dsp::is_data_out(pin.name.c_str()));
             if (!is_out)
@@ -362,6 +381,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             } else if (is_dsp(inst.type)) {
                 for (const auto &p2 : dsp::kDsp48e1)
                     if (pin.name == p2.name) mem_width = std::max(p2.width, 1);
+            } else if (RAM_SINGLE.count(inst.type) && pin.name == "O") {
+                mem_width = 1;
             } else if (!memory_as_state_ && RAM_PORTS.count(inst.type) &&
                        pin.name.rfind("DO", 0) == 0) {
                 // Not under the state model: that one wants the whole pin, to
@@ -421,7 +442,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                 }
             }
             if (is_xcol(inst.type)) {
-                if (pin.name == "Q" && param_str(inst, "FF_SRC", "none") != "none") {
+                if (pin.name == "Q" && param_str(inst, "FF_SRC", "none") != "none" &&
+                    param_str(inst, "FF_THRU", "0").back() != '1') {
                     states_.insert(n);
                     ff_by_state_[n] = &inst;
                 } else if (pin.name == "MUX" && param_str(inst, "OUTMUX", "none") == "5Q") {
@@ -461,6 +483,26 @@ void Cones::collect_mem_ports()
             // RSTRAMB a design leans on.
             MemPort mp;
             mp.where = inst.name;
+            // A port of width 0 is a port the design does not have.  The
+            // synthesis still writes its data pins, usually as literal zeros
+            // (LiteX ties every unused input low), while an implementation is
+            // free to leave the pins unrouted -- Vivado does, and an unrouted
+            // pin reads the interconnect pull-up.  Asking the two to agree
+            // about the data of a write that can never happen is not a
+            // question about the design.  The address and enable of the
+            // disabled port are still compared: a port the synthesis says is
+            // disabled had better be one the bitstream leaves disabled too.
+            auto width_of = [&](const char *name) -> uint64_t {
+                auto v = inst.param(name);
+                return v ? parse_init(*v) : 0;
+            };
+            bool no_write_a = inst.param("WRITE_WIDTH_A") && width_of("WRITE_WIDTH_A") == 0;
+            bool no_write_b = inst.param("WRITE_WIDTH_B") && width_of("WRITE_WIDTH_B") == 0;
+            auto write_data_unused = [&](const std::string &pin) {
+                if (no_write_a && (pin == "DIADI" || pin == "DIPADIP" || pin == "WEA")) return true;
+                if (no_write_b && (pin == "DIBDI" || pin == "DIPBDIP" || pin == "WEBWE")) return true;
+                return false;
+            };
             for (const auto &p : bram_ports(inst.type, false)) {
                 // Not the clock.  The tile model does not reconstruct the
                 // clock tree, it assumes it: with one BUFG in the design there
@@ -493,7 +535,8 @@ void Cones::collect_mem_ports()
                     // always has SOMETHING on the pin -- an unrouted one sits
                     // on the interconnect pull-up -- and demanding that the
                     // two agree would fail on pins neither design uses.
-                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, b));
+                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, b) ||
+                                         write_data_unused(p.first));
                 }
                 mp.boundary.push_back(std::move(g));
             }
@@ -535,7 +578,69 @@ void Cones::collect_mem_ports()
             }
             continue;
         }
+        if (RAM_SINGLE.count(inst.type)) {
+            int abits = RAM_SINGLE.at(inst.type);
+            MemPort mp;
+            mp.where = inst.name;
+            // One address for both: what it reads is what it writes.  The
+            // fabric side names them separately -- its read climbs the mux
+            // selects, its write takes the WA pins -- and both must agree
+            // with this one, which is the whole of what makes the port
+            // single.
+            mp.boundary.push_back(group("read address", bits_of(inst, "A", abits)));
+            mp.boundary.push_back(group("write address", bits_of(inst, "A", abits)));
+            {
+                MemPort::Group g = group("write data", {lit_of(inst, "D", LIT_FALSE)});
+                const Pin *dp = inst.find_pin("D");
+                g.dontcare.assign(1, !dp || bit_is_dontcare(dp->conn, 0));
+                mp.boundary.push_back(std::move(g));
+            }
+            mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
+            mp.out_sym.push_back(mem_cut_name(inst.name, "O", 0));
+            mem_ports_.push_back(std::move(mp));
+            continue;
+        }
         if (!is_xcol(inst.type) || param_str(inst, "RAM", "0") == "0") continue;
+        // A column of a deeper group: the group is one port, cut at the mux
+        // it reads out on, and any one of its columns carries the whole
+        // boundary -- the read address up the selects, the write address up
+        // WA7/WA8, the shared data and enable.  The first column met speaks
+        // for the group; the rest are the same port and are not counted
+        // again.
+        {
+            std::string grp = param_str(inst, "GROUP", "");
+            int depth = atoi(param_str(inst, "DEPTH", "64").c_str());
+            if (!grp.empty() && depth > 64) {
+                if (grouped_.count(grp)) continue;
+                grouped_.insert(grp);
+                int abits = depth == 256 ? 8 : 7;
+                MemPort mp;
+                mp.where = grp;
+                {
+                    std::vector<Lit> ra;
+                    for (int i = 0; i < 6; i++) {
+                        const Pin *a = inst.find_pin("A" + std::to_string(i + 1));
+                        ra.push_back(a ? eval_expr(a->conn, 0) : LIT_FALSE);
+                    }
+                    ra.push_back(lit_of(inst, "RA7", LIT_FALSE));
+                    if (abits == 8) ra.push_back(lit_of(inst, "RA8", LIT_FALSE));
+                    mp.boundary.push_back(group("read address", std::move(ra)));
+                }
+                {
+                    std::vector<Lit> wa = bits_of(inst, "WA", 6);
+                    wa.push_back(lit_of(inst, "WA7", LIT_FALSE));
+                    if (abits == 8) wa.push_back(lit_of(inst, "WA8", LIT_FALSE));
+                    mp.boundary.push_back(group("write address", std::move(wa)));
+                }
+                mp.boundary.push_back(group("write data", {lit_of(inst, "DI", LIT_FALSE)}));
+                mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
+                mp.out_sym.push_back(mem_cut_name(grp, "O", 0));
+                // ...and the cut itself: the group's mux output reads the
+                // free symbol, so nothing descends into the columns.
+                mem_ports_.push_back(std::move(mp));
+                continue;
+            }
+        }
         bool small = param_str(inst, "RAM32", "0") != "0";
         int abits = small ? 5 : 6;
         MemPort mp;
@@ -665,6 +770,11 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
         return LIT_FALSE;
     }
 
+    if (RAM_SINGLE.count(inst.type) && pin == "O") {
+        std::string key = mem_cut_name(inst.name, "O", 0);
+        auto c = mem_cut_.find(key);
+        return net_.input(c == mem_cut_.end() ? key : c->second);
+    }
     if (RAM_PORTS.count(inst.type) && pin.rfind("DO", 0) == 0) {
         // A cut point.  What a memory reads is not derived here at all: it is
         // a free symbol, and the paired memory on the other side is given the
@@ -828,8 +938,21 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
                                                          : in("X");
             return net_.mk_or(net_.mk_and(o6, ci), net_.mk_and(negate(o6), di));
         }
-        if (pin == "Q")
+        if (pin == "Q") {
+            // A latch held open (see tileverilog): the column's Q IS its D
+            // source, combinationally.
+            if (param_str(inst, "FF_THRU", "0").back() == '1') {
+                std::string src = param_str(inst, "FF_SRC", "none");
+                if (src == "O6") return eval_cell_output(inst, "O6", depth);
+                if (src == "O5") return eval_cell_output(inst, "O5", depth);
+                if (src == "X") return in("X");
+                if (src == "XOR") return eval_cell_output(inst, "XOR", depth);
+                if (src == "CY") return eval_cell_output(inst, "CO", depth);
+                if (src == "F7F8") { const Pin *fx = inst.find_pin("FX"); return fx ? eval_expr(fx->conn, depth) : LIT_FALSE; }
+                return LIT_FALSE;
+            }
             return sym_state(n_for_output(inst, "Q"));
+        }
         if (pin == "MUX") {
             std::string sel = param_str(inst, "OUTMUX", "none");
             if (sel == "5Q") return sym_state(n_for_output(inst, "MUX"));

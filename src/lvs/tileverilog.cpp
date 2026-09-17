@@ -124,6 +124,19 @@ int main(int argc, char **argv)
 
     DesignConfig dc = read_fasm(fasm);
 
+    // Tiles the placement puts a RAMB36E1 in; see the block RAM section.
+    std::set<std::string> ramb36_tiles;
+    if (!placement_path.empty()) {
+        try {
+            json::Value place = json::parse(readFile(placement_path));
+            for (const auto &pv : place.members())
+                if (pv.second.get("bel").asString() == "RAMB36E1")
+                    ramb36_tiles.insert(pv.second.get("tile").asString());
+        } catch (const std::exception &e) {
+            std::cerr << "  placement: not read for RAMB36 sites (" << e.what() << ")\n";
+        }
+    }
+
     // ---- database -------------------------------------------------------
     json::Value grid = json::parse(readFile(db + "/" + device + "/tilegrid.json"));
     std::map<std::string, TileInfo> tiles;
@@ -285,6 +298,24 @@ int main(int argc, char **argv)
             pip_driven.insert(tw(kv.first, feat.substr(0, dot)));
         }
     }
+    // The same set before the pseudo-PIPs are added to it: what the design
+    // ROUTED, as opposed to what is hardwired.  See the latch note below.
+    const std::set<std::string> real_pip_driven = pip_driven;
+    // ...and the wires those PIPs read FROM: what the routing consumes.  A
+    // column whose output feeds a PIP is in use whatever its features say.
+    std::set<std::string> real_pip_sources;
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        const std::vector<std::string> *sn =
+            ti == tiles.end() ? nullptr : &site_names[ti->second.type];
+        for (const auto &feat : kv.second) {
+            auto dot = feat.find('.');
+            if (dot == std::string::npos) continue;
+            if (sn && std::find(sn->begin(), sn->end(), feat.substr(0, dot)) != sn->end()) continue;
+            if (feat.find('.', dot + 1) != std::string::npos) continue;
+            real_pip_sources.insert(tw(kv.first, feat.substr(dot + 1)));
+        }
+    }
     for (const auto &kv : dc.slices) {
         auto ti = tiles.find(kv.second.tile);
         if (ti == tiles.end()) continue;
@@ -292,6 +323,21 @@ int main(int argc, char **argv)
         const auto &per = site_pins[ti->second.type];
         if (ordinal < int(per.size()))
             for (const auto &pw : per[ordinal]) known.insert(tw(kv.second.tile, pw.second));
+    }
+    // The pads, likewise.  A pad reaches the fabric over hops that set no
+    // bit -- IOB to IBUF, IBUF to the ILOGIC's D, its O to LOGIC_OUTS -- and
+    // the growth below applies a hardwired hop only from an endpoint it
+    // already knows.  nextpnr's FASM writes those hops and so names the
+    // wires; a bitstream shows an input pad only as its IOB's site features,
+    // and the XDC only names its tile.  Seeding the IOB's own pins is what
+    // lets a Vivado bitstream's reset reach the reset synchroniser.
+    for (const auto &t : used) {
+        auto it = tiles.find(t);
+        if (it == tiles.end()) continue;
+        if (it->second.type.find("IOB") == std::string::npos) continue;
+        load_type(it->second.type);
+        for (const auto &per : site_pins[it->second.type])
+            for (const auto &pw : per) known.insert(tw(t, pw.second));
     }
 
     std::map<std::string, std::vector<std::string>> tiles_by_type;
@@ -340,6 +386,16 @@ int main(int argc, char **argv)
     int joins = 0, rounds = 0, n_always = 0, n_default = 0;
     bool settled = false;
     std::vector<std::pair<std::string, std::string>> ppip_assigns;   // dst, src
+    // Which `always` source already drives a destination.  A wire cannot have
+    // two hardwired drivers, so a second `always` into the same destination is
+    // the same site output under another name -- BRAM_RAMB18_DOADO0 and
+    // BRAM_FIFO36_DOADOU0 are one pin, seen as the 18Kb half and as the 36Kb
+    // block.  Skipping the second left whichever alias sorted later
+    // unconnected: the upper RAMB18's data outputs went nowhere in a Vivado
+    // bitstream, whose FASM names neither (both are bit-less) while nextpnr
+    // writes the one it used.  Joining the aliases into one node is what the
+    // silicon does.
+    std::map<std::string, std::string> always_src_of;
     for (int round = 0; round < (hops > 0 ? hops : kMaxRounds); round++) {
         rounds = round + 1;
         size_t before = known.size();
@@ -401,9 +457,17 @@ int main(int argc, char **argv)
                     std::string dst = tw(t, pp[0]), src = tw(t, pp[1]);
                     bool kd = known.count(dst), ks = known.count(src);
                     if (!kd && !ks) continue;
-                    if (pip_driven.count(dst)) continue;
+                    if (pip_driven.count(dst)) {
+                        auto prev = always_src_of.find(dst);
+                        if (pp[2] == "always" && prev != always_src_of.end() && prev->second != src) {
+                            dsu.unite(src, prev->second);
+                            if (!ks) { known.insert(src); next_tiles.insert(t); }
+                        }
+                        continue;
+                    }
                     ppip_assigns.push_back({dst, src});
                     pip_driven.insert(dst);
+                    if (pp[2] == "always") always_src_of[dst] = src;
                     dsu.find(dst); dsu.find(src);
                     if (!kd) { known.insert(dst); next_tiles.insert(t); }
                     if (!ks) { known.insert(src); next_tiles.insert(t); }
@@ -603,6 +667,17 @@ int main(int argc, char **argv)
         if (ot != dc.other_tiles.end())
             for (const auto &f : ot->second)
                 if (f.find("BRAM_FIFO36_") != std::string::npos) { is36 = true; break; }
+        // ...which only nextpnr's FASM can say: those FIFO36 hops are
+        // bit-less pseudo-PIPs, so bit2fasm never writes them, and a 36Kb
+        // block at width 18 or 36 IS two 18Kb halves at half the width with
+        // the address shared and the data split -- the same bits and the
+        // same routing as two independent RAMB18s that happen to share an
+        // address bus, which a memory split into width-grains does all the
+        // time.  No configuration bit distinguishes them because no hardware
+        // does.  The one witness is which site the design asked for, and the
+        // placement says so -- the same external fact the XDC supplies for a
+        // pad's name.
+        if (ramb36_tiles.count(tile)) is36 = true;
         if (is36) {
             bram_sites.push_back({tile, "RAMB36_Y0", "RAMB18_Y0", "BRAM_FIFO36_", true,
                                   canon_of("BRAM_FIFO36_")});
@@ -727,7 +802,20 @@ int main(int argc, char **argv)
         // filtered out below, once the loop has seen every site.
         std::set<std::string> ddr_driven;
         int bypassed = 0, unmodelled_io = 0, hardwired = 0;
-        for (const auto &tkv : dc.other_tiles) {
+        // The tiles to look at: every tile the FASM routes through, and
+        // every tile whose I/O site it configures.  The second set is not a
+        // subset of the first: an input-only IOI tile sets no routing bit --
+        // pad to D is hardwired, O to the fabric a pseudo-PIP -- and appears
+        // in a Vivado bitstream only through its site features.  nextpnr's
+        // FASM names the tile anyway because it writes the pseudo-PIPs it
+        // used; a bitstream cannot.
+        std::map<std::string, std::vector<std::string>> io_tiles;
+        for (const auto &tkv : dc.other_tiles) io_tiles[tkv.first];
+        for (const auto &ikv : dc.iologic) {
+            auto slash = ikv.first.find('/');
+            if (slash != std::string::npos) io_tiles[ikv.first.substr(0, slash)];
+        }
+        for (const auto &tkv : io_tiles) {
             auto ti = tiles.find(tkv.first);
             if (ti == tiles.end()) continue;
             load_type(ti->second.type);
@@ -983,9 +1071,25 @@ module xcol #(
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
-    parameter SYNC = 1'b1
+    parameter SYNC = 1'b1,
+    parameter FF_THRU = 1'b0,     // the main register is a latch held open: Q = D
+    // A column of a deeper distributed RAM.  A 128- or 256-deep single-port
+    // RAM spans two or four columns of one slice: each holds 64 of the words,
+    // the write goes to the one column WA7/WA8 select, and the read is the
+    // slice's F7/F8 mux tree over the columns' O6, steered by the same two
+    // bits on the bypass pins.  The tile model still writes every column of
+    // the group -- it has no per-column write decode -- and reads them
+    // through the mux it builds between them, which is the wrong memory
+    // and the right boundary: the equivalence check cuts the group at its
+    // mux output (GOUT), so what it compares is the address, data and
+    // enable that reach the group, never the words inside it.
+    parameter DEPTH = 64,         // 64 | 128 | 256
+    parameter GROUP = "",         // the group this column belongs to, if DEPTH > 64
+    parameter GOUT  = ""          // the net the group reads out on: its F7 or F8
 ) (
     input  wire A1, A2, A3, A4, A5, A6, X,
+    input  wire RA7, RA8,         // the group's read address above A6: the F7 and F8 selects
+    input  wire WA7, WA8,         // ...and its write address above WA[5:0]: CX and BX
     // The wide multiplexer that reaches this column.  It is built OUTSIDE the
     // column, from two neighbouring columns' O6 and one of the slice's bypass
     // pins, because that is where it physically is -- a column cannot see its
@@ -1050,7 +1154,7 @@ module xcol #(
             if (CE) q5 <= ff5_d;
         end
 
-    assign Q   = q;
+    assign Q   = FF_THRU ? ff_d : q;
     assign MUX = (OUTMUX == "O6")  ? O6 : (OUTMUX == "O5") ? O5 :
                  (OUTMUX == "5Q")  ? q5 : (OUTMUX == "XOR") ? xo :
                  (OUTMUX == "CY")  ? CO :
@@ -1077,6 +1181,10 @@ endmodule
     std::vector<std::string> helper_wires;
     std::vector<std::pair<std::string, std::string>> carry_assigns;
     int inst = 0, unmodelled = 0;
+    // The nets the routing reads from, by root -- taken here, after the last
+    // union, since a root recorded earlier may since have been merged away.
+    std::set<std::string> read_roots;
+    for (const auto &w : real_pip_sources) read_roots.insert(dsu.find(w));
     for (const auto &kv : dc.slices) {
         const SliceConfig &sc = kv.second;
         auto ti = tiles.find(sc.tile);
@@ -1100,8 +1208,40 @@ endmodule
         // Its start comes from PRECYINIT; its end drives the COUT site pin,
         // which tileconn joins to the CIN of the slice above.
         std::string prefix = sanitise(sc.tile + "_" + sc.site);
+        // There is no "CARRY4 in use" bit.  CARRY4.<col>CY0 says a column's
+        // carry data comes from O5, and that was the only evidence looked
+        // for -- enough for nextpnr, whose adders take DI from the LUT's O5,
+        // and wrong for Vivado, which feeds a constant DI through the X
+        // bypass (a tie-off on AX..DX), leaving no CY0 feature at all.  With
+        // the chain not instantiated every CI is zero and the XOR sum bit
+        // collapses to O6: an incrementer that never increments, quietly.
+        // So take the chain to exist on any sign of use: a CY0, a column
+        // reading the XOR or CY into its flip-flop or output mux, a start
+        // other than the idle zero, or a COUT that the routing carries on.
         bool has_carry = false;
-        for (const auto &cc : sc.columns) has_carry |= cc.second.carry_used;
+        for (const auto &cc : sc.columns) {
+            const ColumnConfig &col = cc.second;
+            has_carry |= col.carry_used;
+            has_carry |= col.ff_used && col.ff_src_explicit &&
+                         (col.ff_src == FFSrc::Xor || col.ff_src == FFSrc::Carry);
+            has_carry |= col.outmux == OutMux::Xor || col.outmux == OutMux::Carry;
+        }
+        has_carry |= sc.precyinit == PreCyInit::One || sc.precyinit == PreCyInit::AX ||
+                     sc.precyinit == PreCyInit::CIN;
+        // COUT reaches the slice above through tileconn, not a PIP, so the
+        // only sign that it is used is that slice starting its own chain
+        // from CIN -- and a chain that is missing below it would hand it an
+        // undriven carry-in.
+        {
+            auto y_at = sc.tile.rfind('Y');
+            if (y_at != std::string::npos) {
+                std::string above = sc.tile.substr(0, y_at + 1) +
+                                    std::to_string(atoi(sc.tile.c_str() + y_at + 1) + 1);
+                auto up = dc.slices.find(above + "/" + sc.site);
+                if (up != dc.slices.end() && up->second.precyinit == PreCyInit::CIN)
+                    has_carry = true;
+            }
+        }
         std::map<char, std::string> ci_of, co_of;
         if (has_carry) {
             std::string start;
@@ -1169,10 +1309,40 @@ endmodule
             if (need_b) fx_of['B'] = mk("F8", "MUXF8", f7b, f7a, net("BX"));
         }
 
-        for (const auto &cc : sc.columns) {
+        // A column with no feature at all -- no INIT, no register, no mux --
+        // is absent from the decode, yet may still be a constant-0 LUT the
+        // routing reads (the case explained below).  Bring such columns in
+        // with a default configuration, so the loop sees them.
+        std::map<char, ColumnConfig> columns = sc.columns;
+        for (char c : {'A', 'B', 'C', 'D'}) {
+            if (columns.count(c)) continue;
+            std::string o6 = raw(std::string(1, c));
+            if (!o6.empty() && read_roots.count(dsu.find(o6))) {
+                ColumnConfig cc;
+                cc.col = c;
+                columns[c] = cc;
+            }
+        }
+        for (const auto &cc : columns) {
             char c = cc.first;
             const ColumnConfig &col = cc.second;
-            if (!col.init && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
+            // A column with nothing configured is empty -- but "no INIT" is
+            // not "nothing".  prjxray's bit2fasm omits a feature whose bits
+            // are all zero, so a Vivado bitstream's RAM column with zero
+            // initial contents (most of them) arrives with no INIT at all,
+            // and dropping it silently deletes a quarter of a RAM32M.  A
+            // writable column is live by definition, INIT or not.
+            // The other face of the same gap: a LUT whose INIT is all zero
+            // is how Vivado makes a constant 0, and bit2fasm writes nothing
+            // for it.  What says the column is there is that the routing
+            // reads its output -- so a column whose O6 feeds a PIP is kept,
+            // INIT or not, and reads as the constant its (absent) INIT says.
+            bool o6_read = false;
+            {
+                std::string o6 = raw(std::string(1, c));
+                if (!o6.empty() && read_roots.count(dsu.find(o6))) o6_read = true;
+            }
+            if (!col.init && !col.ram && !o6_read && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
             std::string C(1, c);
             // Distributed RAM.  The write address is one per SLICE, not one
             // per column -- it arrives on the slice's WA pins, which the D
@@ -1209,6 +1379,54 @@ endmodule
             }
             const char *ffsrc = col.ff_used ? (col.ff_src_explicit ? to_string(col.ff_src) : "O6") : "none";
             const char *ff5src = col.ff5_used ? (col.ff5_src_explicit ? to_string(col.ff5_src) : "O5") : "none";
+            // A deeper single-port RAM: WA8USED says 256 over all four
+            // columns, WA7USED 128 over a pair -- C/D when A is not a RAM,
+            // else both pairs.  The group reads out on the mux the tree
+            // above built for it.  (A 128x1D dual-port also sets WA7USED
+            // with all four columns writable, reading its second port on
+            // F7A; it is grouped the same way and reads out the same way.)
+            int depth = 64;
+            std::string group, gout;
+            if (col.ram && !col.ram_small && (sc.wa8used || sc.wa7used)) {
+                auto ram_col = [&](char x) {
+                    auto it = sc.columns.find(x);
+                    return it != sc.columns.end() && it->second.ram;
+                };
+                if (sc.wa8used) {
+                    depth = 256;
+                    group = prefix + "_M256";
+                    gout = fx_of.count('B') ? fx_of['B'] : "";
+                } else {
+                    depth = 128;
+                    bool cd = (c == 'C' || c == 'D') || !ram_col('A');
+                    group = prefix + (cd ? "_M128CD" : "_M128AB");
+                    gout = cd ? (fx_of.count('C') ? fx_of['C'] : "") : (fx_of.count('A') ? fx_of['A'] : "");
+                }
+            }
+            // A slice in LATCH mode with its clock pin left unrouted is
+            // Vivado's second way out of a column: BMUX carries the carry-out
+            // and the XOR sum leaves through BQ, via a latch that is never
+            // closed.  The unrouted pin reads the interconnect pull-up (the
+            // database's own default, FAN_ALT -> VCC_WIRE), CLKINV turns that
+            // into a low gate, and a 7-series slice latch is open on a low
+            // gate -- which is the reading under which Vivado's own output
+            // is a route-through and under no other.  A LATCH slice whose
+            // clock IS routed is a real latch, which no boolean cone can
+            // state; it is left as a register and reported.
+            bool ff_thru = false;
+            if (sc.latch && col.ff_used) {
+                std::string clk_raw = raw("CLK");
+                bool routed = false;
+                if (!clk_raw.empty()) {
+                    std::string root = dsu.find(clk_raw);
+                    for (const auto &w : real_pip_driven)
+                        if (dsu.find(w) == root) { routed = true; break; }
+                }
+                if (!routed && ((pullup ^ (sc.clkinv ? 1 : 0)) == 0))
+                    ff_thru = true;
+                else
+                    unmodelled++;
+            }
             std::ostringstream initv;
             initv << "64'h" << std::hex << (col.init ? *col.init : 0);
             body << "  xcol #(." << "INIT(" << initv.str() << "), .RAM(" << (col.ram ? 1 : 0)
@@ -1217,9 +1435,19 @@ endmodule
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
                << "), .FF5_INIT(1'b" << col.ff5_init << "), .FF5_SRVAL(1'b" << col.ff5_srval
-               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "))\n"
+               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
+               << "), .DEPTH(" << depth << "), .GROUP(\"" << group << "\"), .GOUT(\"" << gout << "\"))\n"
                << "    \\" << inst_name(sc.tile, sc.site, C, raw(C + "Q"), raw(C + "MUX")) << " (";
             for (int i = 1; i <= 6; i++) body << ".A" << i << "(" << net(C + std::to_string(i)) << "), ";
+            if (depth > 64) {
+                // The read select of this column's own F7 is the X pin of the
+                // pair's lower column (AX for A/B, CX for C/D); the F8's is BX.
+                bool cd = (c == 'C' || c == 'D');
+                body << ".RA7(" << net(cd ? "CX" : "AX") << "), .RA8(" << (depth == 256 ? net("BX") : std::string("1'b0"))
+                     << "), .WA7(" << net("CX") << "), .WA8(" << (depth == 256 ? net("BX") : std::string("1'b0")) << "), ";
+            } else {
+                body << ".RA7(1'b0), .RA8(1'b0), .WA7(1'b0), .WA8(1'b0), ";
+            }
             body << ".X(" << net(C + "X") << "), .CLK(" << net("CLK") << "), "
                << ".CE(" << (sc.ceusedmux ? net("CE") : std::string("1'b1")) << "), "
                << ".SR(" << (sc.srusedmux ? net("SR") : std::string("1'b0")) << "),\n"

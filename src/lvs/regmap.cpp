@@ -215,6 +215,47 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         }
     }
 
+    // The deeper single-port RAMs.  A placement cell "<ram>/ADDR<n>" is one
+    // column of a RAM128X1S or RAM256X1S (nextpnr's packer names them so,
+    // and the Vivado placement dump follows it), and the tile model reads
+    // the whole group out on one mux, under a name built from the site plus
+    // the group: _M256 for the slice, _M128AB or _M128CD for a pair.  Any
+    // one column of the group locates it.
+    {
+        static const std::regex addr(R"(^(.*)/ADDR(\d)$)");
+        const json::Value &gcells = mod->get("cells");
+        for (const auto &pv : place.members()) {
+            if (pv.second.get("type").asString() != "SLICE_LUTX") continue;
+            std::smatch m;
+            const std::string cell = pv.first;
+            if (!std::regex_match(cell, m, addr)) continue;
+            const json::Value &gc = gcells.get(m[1].str());
+            if (gc.isNull()) continue;
+            std::string gtype = gc.get("type").asString();
+            if (gtype != "RAM256X1S" && gtype != "RAM128X1S") continue;
+            std::string bel = pv.second.get("bel").asString();
+            if (bel.empty() || bel[0] < 'A' || bel[0] > 'D') continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::vector<std::pair<int, std::string>> sl;
+            for (const auto &sv : tv.get("sites").members())
+                if (sv.first.rfind("SLICE_X", 0) == 0)
+                    sl.push_back({atoi(sv.first.c_str() + 7), sv.first});
+            std::sort(sl.begin(), sl.end());
+            int ord = -1;
+            for (size_t i = 0; i < sl.size(); i++)
+                if (sl[i].second == site) ord = int(i);
+            if (ord < 0) continue;
+            std::string stype = tv.get("sites").get(site).asString();
+            std::string suffix = gtype == "RAM256X1S" ? "_M256"
+                               : (bel[0] == 'C' || bel[0] == 'D') ? "_M128CD" : "_M128AB";
+            std::string gate = sanitise(tile + "_" + stype + "_X" + std::to_string(ord)) + suffix;
+            out.mem[gate + ":O[0]"] = m[1].str() + ":O[0]";
+        }
+    }
+
     // Block RAM.  Nothing here has to understand what the memory does: the
     // placement says which synthesis cell sits in which site, the tile model
     // names its instance after that site, and pairing the two is enough for

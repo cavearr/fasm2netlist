@@ -275,6 +275,7 @@ DesignConfig read_fasm(const std::string &path)
         if (rest == "FFSYNC") { sc.ffsync = true; continue; }
         if (rest == "NOCLKINV") { sc.clkinv = false; continue; }
         if (rest == "CLKINV") { sc.clkinv = true; continue; }
+        if (rest == "LATCH") { sc.latch = true; continue; }
         if (rest == "SRUSEDMUX") { sc.srusedmux = true; continue; }
         if (rest == "CEUSEDMUX") { sc.ceusedmux = true; continue; }
 
@@ -387,6 +388,7 @@ void DesignConfig::dump(std::ostream &os) const
         if (sc.precyinit != PreCyInit::None)
             os << " precyinit=" << to_string(sc.precyinit);
         if (sc.we_from_ce) os << " we=CE";
+        if (sc.latch) os << " latch";
         if (sc.wa7used) os << " wa7";
         if (sc.wa8used) os << " wa8";
         os << "\n";

@@ -83,6 +83,8 @@ struct SliceConfig
 {
     std::string tile, tile_type, site;   // e.g. CLBLM_R_X31Y135, CLBLM_R, SLICEM_X0
     bool ffsync = false, clkinv = false, srusedmux = false, ceusedmux = false;
+    // LATCH: every storage element in the slice is a latch, gated by CLK.
+    bool latch = false;
     PreCyInit precyinit = PreCyInit::None;
     // Memory write control, shared by every column of the slice.
     bool we_from_ce = false;   // WEMUX.CE: the write enable is the CE pin, not WE

@@ -113,6 +113,7 @@ class Cones
     Lit sym_state(const std::string &x);
 
     bool memory_as_state_ = false;
+    std::set<std::string> grouped_;   // deep-RAM groups already given their port
     const Module &mod_;
     BoolNet &net_;
     std::map<std::string, Driver> driver_;   // net -> what drives it
