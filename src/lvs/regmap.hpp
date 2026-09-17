@@ -42,6 +42,9 @@ struct RegMap {
         std::string type;       // the bel, e.g. RAMB36E1, MMCME2_ADV
         std::string site;       // where the placement put it
         std::string gate_name;  // what the tile model calls it, if it models it
+        // ...and the other name it may go by, where only the FASM can say
+        // which: the I/O site of a _SING_ tile, Y0 or Y1.  Empty otherwise.
+        std::string gate_name_alt;
     };
     std::map<std::string, HardBlock> hard;   // gold cell name -> where it went
 

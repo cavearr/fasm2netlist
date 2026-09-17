@@ -437,7 +437,9 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                 // halves above are, rather than parsing the Y and hoping.
                 const char *pfx = is_in ? "ILOGIC_" : "OLOGIC_";
                 const json::Value &tv = grid.get(tile);
-                std::string fasm_site;
+                // Every name the site can go by in the extraction: one, except
+                // in a _SING_ tile -- see below.
+                std::vector<std::string> fasm_sites;
                 if (!tv.isNull()) {
                     std::vector<std::pair<int, std::string>> at;
                     for (const auto &sv : tv.get("sites").members()) {
@@ -457,26 +459,39 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                     // half in use reads as a hard block missing from the
                     // extraction, and for a tile with both in use silently
                     // pairs each cell with its neighbour.
-                    //
-                    // A _SING_ tile holds one half, and which one it is depends
-                    // on where the tile sits relative to its HCLK row rather
-                    // than on anything here.  Rather than guess, leave it
-                    // unnamed: an unmodelled block is reported as such, and a
-                    // wrong pairing is not.
                     if (at.size() == 2)
                         for (size_t i = 0; i < at.size(); i++)
                             if (at[i].second == hb.site)
-                                fasm_site = std::string(pfx) + "Y" + std::to_string(1 - i);
+                                fasm_sites.push_back(std::string(pfx) + "Y" + std::to_string(1 - i));
+                    // A _SING_ tile holds one half, and which one it is depends
+                    // on where the tile sits relative to its HCLK row rather
+                    // than on anything here -- and the database's alias offset
+                    // is no stand-in for it, since on some parts it names the
+                    // other half.  But the tile holds ONE site of this kind, so
+                    // there is no neighbour to pair the cell with by mistake,
+                    // only a spelling to get wrong.  Name both spellings: the
+                    // extraction takes the half from the FASM and instantiates
+                    // exactly one of them, and a symbol the gate never produces
+                    // pairs with nothing.
+                    const bool sing_site = at.size() == 1 && at[0].second == hb.site;
+                    if (sing_site)
+                        for (const char *half : {"Y0", "Y1"})
+                            fasm_sites.push_back(std::string(pfx) + half);
                 }
                 // An OLOGIC holds two registers and the synthesis spends a
                 // cell on each: OUTFF on the data path, TFF on the tristate.
                 // They share a site, so the site name alone collides -- and a
                 // collision here is silent, two cells claiming one gate.  The
                 // placement names the bel; use it.
-                if (!fasm_site.empty()) {
+                for (std::string fasm_site : fasm_sites) {
                     std::string bel_name = pv2.get("bel").asString();
-                    if (bel == "ODDR" && bel_name == "TFF") fasm_site += "_TFF";
-                    hb.gate_name = sanitise(tile + "_" + fasm_site);
+                    const bool tristate_register = bel == "ODDR" && bel_name == "TFF";
+                    if (tristate_register) fasm_site += "_TFF";
+                    const std::string gate_name = sanitise(tile + "_" + fasm_site);
+                    if (hb.gate_name.empty())
+                        hb.gate_name = gate_name;
+                    else
+                        hb.gate_name_alt = gate_name;
                     // Naming the pair is not enough: the cut has to be joined
                     // too, the way a block RAM's data outputs are, or each
                     // side invents its own free variable for the same pin and
@@ -488,7 +503,7 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                         : bel == "ISERDESE2" ? kIserdesOuts
                                             : kOserdesOuts;
                     for (const char *pin : outs)
-                        out.mem[hb.gate_name + ":" + pin + "[0]"] =
+                        out.mem[gate_name + ":" + pin + "[0]"] =
                             cv.first + ":" + pin + "[0]";
                 }
             }

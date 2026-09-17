@@ -452,8 +452,11 @@ static int run(int argc, char **argv)
                 continue;
             }
             bool found = false;
-            for (const auto &inst : gate_m->instances)
-                if (inst.name == hb.gate_name) { found = true; break; }
+            for (const auto &inst : gate_m->instances) {
+                const bool is_named = inst.name == hb.gate_name;
+                const bool is_named_alt = !hb.gate_name_alt.empty() && inst.name == hb.gate_name_alt;
+                if (is_named || is_named_alt) { found = true; break; }
+            }
             if (!found) {
                 absent.push_back(cell + " (" + hb.type + " at " + hb.site + ")");
                 missing_by_type[hb.type]++;
