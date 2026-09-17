@@ -836,6 +836,26 @@ int main(int argc, char **argv)
 
                     // the site's FASM name carries the same index its wires do
                     std::string idx = owire.substr(at + tag.size(), 1);
+                    // ...except in a _SING_ tile.  It holds ONE site of each
+                    // kind and spells that site's wires with index 0 whichever
+                    // half of a full tile it stands for, while the FASM names
+                    // the site by the half: OLOGIC_Y1 in the SING above its
+                    // HCLK row, OLOGIC_Y0 in the one below.  Going by the wire,
+                    // the upper one's configuration is never found, and an
+                    // OSERDESE2 there is extracted as the bypass wire past it.
+                    // With one site of the kind there is no neighbour to take
+                    // it for, so the half is whichever one the FASM configured.
+                    const auto &type_sites = site_pins[ti->second.type];
+                    const bool single_site =
+                        std::count_if(type_sites.begin(), type_sites.end(), [&](const auto &s) {
+                            auto p = s.find(out_pin);
+                            return p != s.end() && p->second.find(tag) != std::string::npos;
+                        }) == 1;
+                    const bool configured_y0 = dc.iologic.count(tkv.first + "/" + tag + "_Y0") > 0;
+                    const bool configured_y1 = dc.iologic.count(tkv.first + "/" + tag + "_Y1") > 0;
+                    const bool fasm_names_one_half = configured_y0 != configured_y1;
+                    if (single_site && fasm_names_one_half)
+                        idx = configured_y1 ? "1" : "0";
                     auto cfg = dc.iologic.find(tkv.first + "/" + tag + "_Y" + idx);
                     // A DDR register is cut at its boundary and instantiated,
                     // the way a block RAM is: the checker treats the outputs as

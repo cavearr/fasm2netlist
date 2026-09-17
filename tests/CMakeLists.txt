@@ -85,3 +85,15 @@ if(Python3_Interpreter_FOUND)
   )
   set_tests_properties(rtl_roundtrip_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
+
+# The I/O site of a *_SING tile: extracted under the half its FASM names, and
+# found by the hard-block census (see tests/lvs/test_sing_site.py).  Needs no
+# database -- the test writes its own two-tile device -- only the two LVS tools.
+if(LVS_VERILOG_AVAILABLE AND Python3_Interpreter_FOUND)
+  add_test(
+    NAME lvs_sing_site_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/lvs/test_sing_site.py
+            --tileverilog $<TARGET_FILE:tileverilog>
+            --lvs-equiv $<TARGET_FILE:lvs_equiv>
+  )
+endif()
