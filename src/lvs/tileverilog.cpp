@@ -64,6 +64,33 @@ std::string sanitise(const std::string &s)
     return r;
 }
 
+bool ends_with(const std::string &s, const char *suf)
+{
+    size_t n = strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+
+// Direction of one IOB site feature (the part after `IOB_Yn.`).  A DRIVE or
+// trailing .OUT configures an OBUF; .IN / .IN_ONLY / .IN_DIFF and the HP-bank
+// glue configure an IBUF.  IN_TERM is termination, not an input buffer.  The
+// two sets do not overlap on a unidirectional pad -- the same observation
+// classifyIob in main.cpp makes on the Johnson example.
+bool iob_feat_is_out(const std::string &rest)
+{
+    const bool has_drive = rest.find(".DRIVE.") != std::string::npos
+                           || rest.rfind("DRIVE.", 0) == 0;
+    const bool has_out = ends_with(rest, ".OUT") || rest == "OUT";
+    return has_drive || has_out;
+}
+bool iob_feat_is_in(const std::string &rest)
+{
+    const bool hp_glue = rest == "IBUF_HP_BANK_GLUE" || rest == "IBUFDS_BANK_GLUE";
+    const bool in_tag = ends_with(rest, ".IN") || ends_with(rest, ".IN_ONLY")
+                        || ends_with(rest, ".IN_DIFF") || rest == "IN"
+                        || rest == "IN_ONLY" || rest == "IN_DIFF";
+    return hp_glue || in_tag;
+}
+
 struct Dsu
 {
     std::map<std::string, std::string> parent;
@@ -331,6 +358,10 @@ int main(int argc, char **argv)
     // wires; a bitstream shows an input pad only as its IOB's site features,
     // and the XDC only names its tile.  Seeding the IOB's own pins is what
     // lets a Vivado bitstream's reset reach the reset synchroniser.
+    //
+    // Seeding also puts the receive side of an output-only pad in the graph.
+    // That is intentional -- the hops are real -- but the XDC must not name
+    // that wire; see the labelling loop, which takes direction from the FASM.
     for (const auto &t : used) {
         auto it = tiles.find(t);
         if (it == tiles.end()) continue;
@@ -747,9 +778,63 @@ int main(int argc, char **argv)
             int ordinal = int(std::find(ss.begin(), ss.end(), site) - ss.begin());
             const auto &per = site_pins[ti->second.type];
             if (ordinal >= int(per.size())) continue;
+            // The IOB-site seed ("The pads, likewise") puts every pad's I and O
+            // wires in the graph, so a naive label of both sides makes every
+            // output-only pad look bidirectional and the split below takes the
+            // XDC name off the side the design drives.  Direction comes from
+            // the FASM: DRIVE/.OUT is an OBUF, .IN/.IN_ONLY an IBUF.  Label I
+            // only when the site has an input buffer, and O only when it has
+            // an output buffer.  A site with both is bidirectional and is
+            // labelled on both sides, as before.
+            //
+            // FASM names the two sites of a full IOB tile by type, not by the
+            // tile-type y_coord: IOB33M is IOB_Y0, IOB33S is IOB_Y1 (the same
+            // rule fasmIobSuffix in netlist_core.cpp uses).  A *_SING tile has
+            // one site; nextpnr writes IOB_Y1 above the HCLK row and IOB_Y0
+            // below, while the type spells IOB_Y0 -- either spelling is that
+            // site.  OUT_DIFF marks an OBUFDS: the S site is the N pad, whose
+            // O is not a fabric net this comparison can name (it stays skipped).
+            std::string site_type;
+            for (const auto &kv : ti->second.sites)
+                if (kv.first == site) { site_type = kv.second; break; }
+            const bool site_is_m = !site_type.empty() && site_type.back() == 'M';
+            const bool site_is_s = !site_type.empty() && site_type.back() == 'S';
+            const bool single_iob_site = per.size() == 1;
+            bool tile_out_diff = false;
+            bool site_has_in = false, site_has_out = false;
+            if (auto ot = dc.other_tiles.find(tile); ot != dc.other_tiles.end()) {
+                std::string want;
+                if (site_is_m) want = "IOB_Y0";
+                else if (site_is_s) want = "IOB_Y1";
+                else if (ordinal < int(site_names[ti->second.type].size()))
+                    want = site_names[ti->second.type][ordinal];
+                for (const auto &feat : ot->second) {
+                    if (feat == "OUT_DIFF") tile_out_diff = true;
+                    auto d1 = feat.find('.');
+                    if (d1 == std::string::npos) continue;
+                    std::string fasm_site = feat.substr(0, d1);
+                    if (fasm_site.rfind("IOB_Y", 0) != 0) continue;
+                    const bool names_this_site = (fasm_site == want);
+                    const bool sing_spelling = single_iob_site;
+                    if (!names_this_site && !sing_spelling) continue;
+                    std::string rest = feat.substr(d1 + 1);
+                    if (iob_feat_is_in(rest)) site_has_in = true;
+                    if (iob_feat_is_out(rest)) site_has_out = true;
+                }
+            }
+            const bool output_only = site_has_out && !site_has_in;
+            const bool input_only = site_has_in && !site_has_out;
+            const bool differential_n = tile_out_diff && site_is_s;
             for (const char *pn : {"I", "O"}) {
                 auto it = per[ordinal].find(pn);
                 if (it == per[ordinal].end()) continue;
+                const bool receive_side = pn[0] == 'I';
+                const bool skip_receive_of_output_only = receive_side && output_only;
+                if (skip_receive_of_output_only) continue;
+                const bool skip_drive_of_input_only = !receive_side && input_only;
+                if (skip_drive_of_input_only) continue;
+                const bool skip_obufds_n = !receive_side && differential_n;
+                if (skip_obufds_n) continue;
                 std::string ep = tw(tile, it->second);
                 if (!dsu.parent.count(ep)) continue;
                 friendly[dsu.find(ep)] = port;
@@ -1812,16 +1897,30 @@ endmodule
             auto f = friendly.find(root_of[n]);
             if (f != friendly.end()) port_named[f->second] = n;
         }
-        int split = 0;
+        int split = 0, kept_on_drive = 0;
         for (const auto &n : outs) {
             auto f = friendly.find(root_of[n]);
             if (f == friendly.end() || !port_named.count(f->second)) continue;
+            // A pad is bidirectional only if the design also reads the receive
+            // side.  The IOB-site seed puts that side in the graph for every
+            // pad; if nothing in the fabric consumes it, the pad is output-only
+            // and the name stays on what the design drives.
+            const std::string &recv = port_named[f->second];
+            const bool fabric_reads_receive = read_roots.count(root_of[recv]) != 0;
+            if (!fabric_reads_receive) {
+                friendly.erase(root_of[recv]);
+                kept_on_drive++;
+                continue;
+            }
             friendly.erase(f);
             split++;
         }
         if (split)
             std::cerr << "  " << split << " bidirectional pad(s): the name follows what the design"
                       << " reads, since what it drives is not what it must read back\n";
+        if (kept_on_drive)
+            std::cerr << "  " << kept_on_drive << " output-only pad(s): the receive side is unused, so"
+                      << " the name stays on what the design drives\n";
     }
 
     std::vector<std::string> port_decl, out_decl;
