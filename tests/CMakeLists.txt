@@ -96,4 +96,13 @@ if(LVS_VERILOG_AVAILABLE AND Python3_Interpreter_FOUND)
             --tileverilog $<TARGET_FILE:tileverilog>
             --lvs-equiv $<TARGET_FILE:lvs_equiv>
   )
+
+  # IOB-site seeding vs XDC labelling: an input pad with no routing still
+  # enters the graph, and an output-only pad keeps the name on the side the
+  # design drives (see tests/lvs/test_iob_pad_direction.py).
+  add_test(
+    NAME lvs_iob_pad_direction_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/lvs/test_iob_pad_direction.py
+            --tileverilog $<TARGET_FILE:tileverilog>
+  )
 endif()
