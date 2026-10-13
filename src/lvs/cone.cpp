@@ -514,6 +514,8 @@ static std::map<std::string, std::string> cut_config(const Instance &inst)
 {
     std::map<std::string, std::string> out;
     for (const auto &pr : inst.params) {
+        // Simulation-only: no bit, no hardware effect.
+        if (pr.name == "SIM_DEVICE" || pr.name == "SIM_COLLISION_CHECK" || pr.name == "INIT_FILE") continue;
         std::string v = canon_value(pr.value);
         // The bitstream cannot tell the upper block of a cascaded pair from a RAM on its own: prjxray's RAM_EXTENSION_*_NONE_OR_UPPER is one bit,
         // set for LOWER and clear for both, so the extraction says NONE for an UPPER and the two are the same thing here.  Likewise MULTIPLY and
@@ -626,7 +628,10 @@ void Cones::collect_mem_ports()
                     // extraction can see, and not a net either side can name.  What decides the cascade is RAM_EXTENSION and address
                     // bit 15, which are compared.
                     g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, sb) ||
-                                         write_data_unused(p.first) || parity_unused || p.first.rfind("CASCADEIN", 0) == 0);
+                                         write_data_unused(p.first) || parity_unused || p.first.rfind("CASCADEIN", 0) == 0 ||
+                                         (is36 && b == 15 && (p.first == "ADDRARDADDR" || p.first == "ADDRBWRADDR") &&
+                                          param_str(inst, p.first == "ADDRARDADDR" ? "RAM_EXTENSION_A" : "RAM_EXTENSION_B", "NONE") != "LOWER" &&
+                                          param_str(inst, p.first == "ADDRARDADDR" ? "RAM_EXTENSION_A" : "RAM_EXTENSION_B", "NONE") != "UPPER"));
                 }
                 mp.boundary.push_back(std::move(g));
             }
@@ -649,6 +654,11 @@ void Cones::collect_mem_ports()
             mp.where = inst.name;
             mp.dsp = true;
             mp.contents = cut_config(inst);
+            // The per-pin inversions are applied to the pins below, so a row of their own would compare the same fact twice (and
+            // spuriously: a synthesis that inverts a pin and a bitstream that inverts the net feeding it agree at the pin).
+            for (const char *k : {"IS_ALUMODE_INVERTED", "IS_INMODE_INVERTED", "IS_OPMODE_INVERTED", "IS_CARRYIN_INVERTED"})
+                mp.contents.erase(k);
+            const bool dport = param_str(inst, "USE_DPORT", "FALSE") == "TRUE";
             for (const auto &p : dsp::kDsp48e1) {
                 const Pin *pin = inst.find_pin(p.name);
                 if (!pin)
@@ -660,10 +670,27 @@ void Cones::collect_mem_ports()
                         if (!bn.empty()) mp.out_sym.push_back(bn);
                     }
                 } else {
+                    const std::string name = p.name;
+                    // The clock is assumed common to both sides, as for a block RAM (--routed-clock turns that off).
+                    if (name == "CLK") continue;
                     MemPort::Group g;
-                    g.what = p.name;
-                    for (int b = 0; b < w; b++) g.bits.push_back(eval_bit(pin->conn, b, 0));
-                    mp.boundary.push_back(g);
+                    g.what = name;
+                    // The cascade inputs are a dedicated wire from the neighbouring DSP, not a net a fabric extraction can see, and
+                    // D is not looked at when USE_DPORT is FALSE.  What chooses the cascade is OPMODE and the configuration, which
+                    // are compared.
+                    const bool cascade = name == "ACIN" || name == "BCIN" || name == "PCIN" || name == "CARRYCASCIN" ||
+                                         name == "MULTSIGNIN";
+                    const bool unused = cascade || (name == "D" && !dport);
+                    // A control pin is compared as the site sees it: after IS_<pin>_INVERTED, per bit.
+                    uint64_t invmask = 0;
+                    if (name == "ALUMODE" || name == "INMODE" || name == "OPMODE" || name == "CARRYIN")
+                        invmask = parse_init(param_str(inst, "IS_" + name + "_INVERTED", "0"));
+                    for (int b = 0; b < w; b++) {
+                        Lit v = eval_bit(pin->conn, b, 0);
+                        g.bits.push_back((invmask >> b) & 1 ? negate(v) : v);
+                        g.dontcare.push_back(unused || bit_is_dontcare(pin->conn, b));
+                    }
+                    mp.boundary.push_back(std::move(g));
                 }
             }
             if (!mp.out_sym.empty()) mem_ports_.push_back(mp);

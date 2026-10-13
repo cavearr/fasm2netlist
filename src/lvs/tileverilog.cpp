@@ -256,12 +256,17 @@ int main(int argc, char **argv)
     std::map<std::string, std::map<std::string, PipT>> pip_timing;              // type -> "src\ndst"
     std::map<std::string, std::map<std::string, std::pair<double, double>>> wire_rc; // type -> wire -> (cap, res)
     auto num = [](const json::Value &v) { return v.isNull() || v.isString() ? (v.isString() ? atof(v.asString().c_str()) : 0.0) : v.asDouble(); };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> real_pips;   // DSP types only: (dst, src)
     auto load_type = [&](const std::string &type) {
         if (site_pins.count(type)) return;
         std::string path = db + "/tile_type_" + type + ".json";
         std::ifstream probe(path);
         if (!probe) { site_pins[type] = {}; return; }
         json::Value tt = json::parse(readFile(path));
+        if (type.rfind("DSP_", 0) == 0)
+            for (const auto &pk : tt.get("pips").members())
+                if (pk.second.get("is_pseudo").asString() != "1")
+                    real_pips[type].push_back({pk.second.get("dst_wire").asString(), pk.second.get("src_wire").asString()});
         if (timing) {
             auto &pt = pip_timing[type];
             for (const auto &pk : tt.get("pips").members()) {
@@ -326,6 +331,30 @@ int main(int argc, char **argv)
             auto d2 = feat.find('.', d1 + 1);
             if (d2 == std::string::npos) continue;
             v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
+        }
+        // A DSP input is a mux whose bits select GND or VCC; with neither set it carries the fabric wire (DSP_BYP/DSP_FAN), a
+        // source that has no bit of its own and, for most pins, no ppips line either.  Taken from the database: a destination
+        // that has segbits, and exactly one real pip with none, is driven by that pip when no bit says otherwise.
+        auto rp = real_pips.find(type);
+        if (rp != real_pips.end()) {
+            std::set<std::string> has_bits, has_line;
+            std::ifstream sb(db + "/segbits_" + lower + ".db");
+            while (std::getline(sb, line)) {
+                std::istringstream ls(line);
+                std::string feat;
+                if (!(ls >> feat)) continue;
+                auto d1 = feat.find('.');
+                auto d2 = feat.find('.', d1 + 1);
+                if (d1 == std::string::npos || d2 == std::string::npos) continue;
+                has_bits.insert(feat.substr(d1 + 1, d2 - d1 - 1));
+                has_bits.insert(feat.substr(d1 + 1));
+            }
+            for (const auto &e : v) has_line.insert(e[0]);
+            std::map<std::string, std::vector<std::string>> bitless;
+            for (const auto &pp : rp->second)
+                if (has_bits.count(pp.first) && !has_bits.count(pp.first + "." + pp.second)) bitless[pp.first].push_back(pp.second);
+            for (const auto &b : bitless)
+                if (b.second.size() == 1 && !has_line.count(b.first)) v.push_back({b.first, b.second[0], "inferred"});
         }
         ppips[type] = v;
     };
@@ -2138,7 +2167,11 @@ endmodule
             size_t n = strlen(suffix);
             return ep.size() >= n && ep.compare(ep.size() - n, n, suffix) == 0;
         };
-        int v = ends_with("GND_WIRE") ? 0 : ends_with("VCC_WIRE") ? 1 : -1;
+        // The DSP tile has its own pair of rails, DSP_GND_L/R and DSP_VCC_L/R: the wires its internal tie-offs (DSP_0_RSTD.DSP_GND_L,
+        // DSP_0_CED.DSP_VCC_L, ...) come from.  They were not recognised, so both took the pull-up and read 1 -- a grounded RSTD extracted as an
+        // asserted reset.  Exact names: wire names that merely contain the letters, such as the transceiver's ...ALIGNDONE, are signals.
+        int v = (ends_with("GND_WIRE") || ends_with("DSP_GND_L") || ends_with("DSP_GND_R")) ? 0
+              : (ends_with("VCC_WIRE") || ends_with("DSP_VCC_L") || ends_with("DSP_VCC_R")) ? 1 : -1;
         if (v < 0)
             continue;
         std::string root = sanitise(dsu.find(ep));
