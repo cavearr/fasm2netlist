@@ -1726,6 +1726,66 @@ endmodule
     // identical boundaries and different INIT strings pass here.  That is a
     // real gap and it is deliberate: `fasm2netlist` reads the contents out of
     // the bitstream, and tests/rtl/build_and_check.py compares them.
+    // The configuration a cut hides: what the primitive does with its pins, as instance parameters, decoded from the tile's FASM
+    // features in the way fasm2netlist's own extractor does (src/cells_bram.cpp).  Contents alone (above) left lvs_equiv comparing
+    // every width, write mode and cascade setting of the synthesis against nothing, and a RAMB36 configured wrongly proved equal.
+    //
+    // A 36Kb port is one rung further up the width ladder than the 18Kb tag its lower half carries -- 2 -> 4, 4 -> 9, 9 -> 18,
+    // 18 -> 36 -- and the bottom rung is the ambiguous one (an 18Kb tag of 1 means 1 or 2): the tile's own BRAM36_*_1 tag resolves it.
+    // A tag that is absent altogether means the port is not configured, and is reported as width 0.
+    auto config_params = [&](const BramSite &b) {
+        std::vector<std::string> ps;
+        auto has = [&](const std::string &site, const std::string &feat) {
+            if (site == "RAMB36") {
+                // The tile-level bits (BRAM36_*_WIDTH_*_1, RAM_EXTENSION_*_LOWER) are headed "RAMB36", which is not a site of the tile --
+                // its site is RAMB36_Y0 -- so they were not filed in site_feats above; read them from the tile's feature list.
+                auto t = dc.other_tiles.find(b.tile);
+                if (t == dc.other_tiles.end()) return false;
+                const std::string want = site + "." + feat;
+                for (const auto &f : t->second)
+                    if (f == want) return true;
+                return false;
+            }
+            auto t = site_feats.find(b.tile);
+            if (t == site_feats.end()) return false;
+            auto st = t->second.find(site);
+            return st != t->second.end() && std::find(st->second.begin(), st->second.end(), feat) != st->second.end();
+        };
+        const std::string lo = b.is36 ? std::string("RAMB18_Y0") : b.cfg_site;
+        auto tag = [&](const std::string &which) {
+            for (int n : {18, 9, 4, 2, 1})
+                if (has(lo, which + "_" + std::to_string(n))) return n;
+            return 0;
+        };
+        auto width = [&](const std::string &which) -> int {
+            int t = tag(which);
+            if (!b.is36 || t == 0) return t;
+            switch (t) {
+            case 2: return 4;
+            case 4: return 9;
+            case 9: return 18;
+            case 18: return 36;
+            default: return has("RAMB36", "BRAM36_" + which + "_1") ? 1 : 2;
+            }
+        };
+        auto num = [&](const char *k, int v) { ps.push_back(std::string(".") + k + "(" + std::to_string(v) + ")"); };
+        auto str = [&](const char *k, const std::string &v) { ps.push_back(std::string(".") + k + "(\"" + v + "\")"); };
+        const bool sdp_r = has(lo, "SDP_READ_WIDTH_36"), sdp_w = has(lo, "SDP_WRITE_WIDTH_36");
+        const int full = b.is36 ? 72 : 36;
+        str("RAM_MODE", sdp_r || sdp_w ? "SDP" : "TDP");
+        num("READ_WIDTH_A", sdp_r ? full : width("READ_WIDTH_A"));
+        num("READ_WIDTH_B", sdp_r ? 0 : width("READ_WIDTH_B"));
+        num("WRITE_WIDTH_A", sdp_w ? 0 : width("WRITE_WIDTH_A"));
+        num("WRITE_WIDTH_B", sdp_w ? full : width("WRITE_WIDTH_B"));
+        for (const char *ab : {"A", "B"}) {
+            const std::string m = std::string("WRITE_MODE_") + ab;
+            str(m.c_str(), has(lo, m + "_READ_FIRST") ? "READ_FIRST" : has(lo, m + "_NO_CHANGE") ? "NO_CHANGE" : "WRITE_FIRST");
+            if (b.is36)
+                str((std::string("RAM_EXTENSION_") + ab).c_str(),
+                    has("RAMB36", std::string("RAM_EXTENSION_") + ab + "_LOWER") ? "LOWER" : "NONE");
+        }
+        return ps;
+    };
     int brams = 0, bram_rows = 0;
     for (const auto &b : bram_sites) {
         if (b.canon.empty()) continue;
@@ -1811,12 +1871,14 @@ endmodule
             for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, nullptr, p.name);
         if (first) continue;   // the routing touches none of it
         std::vector<std::string> cps = content_params(b);
+        const size_t n_content = cps.size();
+        for (auto &c : config_params(b)) cps.push_back(c);
         std::string pstr;
         for (size_t i = 0; i < cps.size(); i++) pstr += (i ? ", " : "") + cps[i];
         body << "  " << (b.is36 ? "RAMB36E1" : "RAMB18E1")
              << (pstr.empty() ? "" : " #(" + pstr + ")") << " \\" << iname << " (" << o.str()
              << ");\n";
-        if (!cps.empty()) bram_rows += cps.size();
+        bram_rows += n_content;
         brams++;
     }
     if (brams)
@@ -1900,7 +1962,102 @@ endmodule
                 o << ")";
             }
             if (first) continue;   // the routing touches none of it
-            body << "  DSP48E1 \\" << iname << " (" << o.str() << ");\n";
+            // The configuration, decoded from the tile's features the way fasm2netlist's own extractor does (src/cells_dsp.cpp), so that
+            // lvs_equiv has something to hold the synthesis's parameters against.  Until now this instance carried none, and a DSP
+            // configured however the bitstream liked compared equal to one the design asked for.  A "Z" tag stores the complement of the
+            // attribute: absent means 1.
+            std::vector<std::string> dps;
+            {
+                const std::string pre = "DSP48." + site + ".";
+                // A one-bit tag is written either bare or with a "[0]": nextpnr writes ZMREG[0], ZDREG[0] and the other Z...REG enables that way,
+                // Vivado's decode does too, while the others (ZAREG_2_ACASCREG_1, USE_DPORT) are bare.  Matching only the bare name read every
+                // Z...REG as absent -- a register enable of 1 -- whatever the bitstream said.
+                auto tag = [&](const std::string &name) {
+                    const std::string want = pre + name, want0 = want + "[0]";
+                    for (const auto &f : kv.second)
+                        if (f == want || f == want0) return true;
+                    return false;
+                };
+                // a vector attribute, MSB first: "NAME[hi:lo] = bits" lines, or individual "NAME[i]" set-bit flags
+                auto vec = [&](const std::string &name, int width) {
+                    std::string bits(width, '0');
+                    const std::string base = pre + name + "[";
+                    auto ov = dc.other_values.find(tile);
+                    if (ov != dc.other_values.end())
+                        for (const auto &e : ov->second) {
+                            if (e.first.rfind(base, 0) != 0) continue;
+                            int hi = 0;
+                            if (sscanf(e.first.c_str() + base.size(), "%d", &hi) != 1) continue;
+                            std::string v = e.second;
+                            size_t b = v.find('b');
+                            if (b != std::string::npos) v = v.substr(b + 1);
+                            v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+                            for (size_t i = 0; i < v.size(); i++) {
+                                int idx = hi - int(i);
+                                if (idx >= 0 && idx < width) bits[width - 1 - idx] = v[i];
+                            }
+                        }
+                    for (const auto &f : kv.second) {
+                        if (f.rfind(base, 0) != 0 || f.find(':') != std::string::npos) continue;
+                        int idx = -1;
+                        if (sscanf(f.c_str() + base.size(), "%d", &idx) == 1 && idx >= 0 && idx < width) bits[width - 1 - idx] = '1';
+                    }
+                    return bits;
+                };
+                auto zbit = [&](const std::string &z) { return tag(z) ? 0 : 1; };
+                auto zvec = [&](const std::string &z, int width) {
+                    std::string b = vec(z, width);
+                    for (char &c : b) c = c == '1' ? '0' : '1';
+                    return b;
+                };
+                auto hex = [](const std::string &bits) {
+                    std::string pad = bits;
+                    if (pad.size() % 4) pad.insert(0, 4 - pad.size() % 4, '0');
+                    std::string h;
+                    for (size_t i = 0; i < pad.size(); i += 4) {
+                        int v = 0;
+                        for (int k = 0; k < 4; k++) v = (v << 1) | (pad[i + k] == '1');
+                        h += "0123456789abcdef"[v];
+                    }
+                    return std::to_string(bits.size()) + "'h" + h;
+                };
+                auto q = [](const std::string &v) { return "\"" + v + "\""; };
+                auto P = [&](const std::string &k, const std::string &v) { dps.push_back("." + k + "(" + v + ")"); };
+                P("A_INPUT", q(tag("A_INPUT") ? "CASCADE" : "DIRECT"));
+                P("B_INPUT", q(tag("B_INPUT") ? "CASCADE" : "DIRECT"));
+                // xREG and xCASCREG share three bits: xREG_0, xREG_2 and Zx REG_2_xCASCREG_1, and the last only matters when xREG is 2
+                for (char ab : {'A', 'B'}) {
+                    const std::string x(1, ab);
+                    int reg = tag(x + "REG_0") ? 0 : (tag(x + "REG_2") ? 2 : 1);
+                    int casc = reg;
+                    if (reg == 2) casc = tag("Z" + x + "REG_2_" + x + "CASCREG_1") ? 2 : 1;
+                    P(x + "REG", std::to_string(reg));
+                    P(x + "CASCREG", std::to_string(casc));
+                }
+                for (const char *r : {"ADREG", "ALUMODEREG", "CARRYINREG", "CARRYINSELREG", "CREG", "DREG", "INMODEREG", "MREG", "OPMODEREG", "PREG"})
+                    P(r, std::to_string(zbit(std::string("Z") + r)));
+                P("USE_DPORT", q(tag("USE_DPORT") ? "TRUE" : "FALSE"));
+                P("USE_SIMD", q(tag("USE_SIMD_FOUR12") ? "FOUR12" : (tag("USE_SIMD_FOUR12_TWO24") ? "TWO24" : "ONE48")));
+                P("AUTORESET_PATDET", q(!tag("AUTORESET_PATDET_RESET") ? "NO_RESET" : (tag("AUTORESET_PATDET_RESET_NOT_MATCH") ? "RESET_NOT_MATCH" : "RESET_MATCH")));
+                std::string sel_mask = "MASK";
+                for (const char *alt : {"C", "ROUNDING_MODE1", "ROUNDING_MODE2"})
+                    if (tag(std::string("SEL_MASK_") + alt)) sel_mask = alt;
+                P("SEL_MASK", q(sel_mask));
+                // Found with a differential test (see the database's FIXES.md): USE_MULT=NONE and SEL_PATTERN=C each have a bit.  MULTIPLY and
+                // DYNAMIC give the same bits, so the extraction can only say MULTIPLY.  USE_PATTERN_DETECT has no bit at all and is not emitted.
+                P("USE_MULT", q(tag("USE_MULT_NONE") ? "NONE" : "MULTIPLY"));
+                P("SEL_PATTERN", q(tag("SEL_PATTERN_C") ? "C" : "PATTERN"));
+                P("MASK", hex(vec("MASK", 48)));
+                P("PATTERN", hex(vec("PATTERN", 48)));
+                P("IS_ALUMODE_INVERTED", hex(zvec("ZIS_ALUMODE_INVERTED", 4)));
+                P("IS_INMODE_INVERTED", hex(zvec("ZIS_INMODE_INVERTED", 5)));
+                P("IS_OPMODE_INVERTED", hex(zvec("ZIS_OPMODE_INVERTED", 7)));
+                P("IS_CARRYIN_INVERTED", "1'b" + std::to_string(zbit("ZIS_CARRYIN_INVERTED")));
+                P("IS_CLK_INVERTED", "1'b" + std::to_string(zbit("ZIS_CLK_INVERTED")));
+            }
+            std::string dstr;
+            for (size_t i = 0; i < dps.size(); i++) dstr += (i ? ", " : "") + dps[i];
+            body << "  DSP48E1 #(" << dstr << ") \\" << iname << " (" << o.str() << ");\n";
             dsps++;
         }
     }

@@ -148,6 +148,7 @@ static int run(int argc, char **argv)
 
     BoolNet net;
     Cones gold(*gold_m, net);
+    gold.mark_synthesis_side();
 
     // The map's gold-side label need not be the name gold's own netlist uses:
     // a net can answer to several names (yosys writes the top-level `led_int`,
@@ -382,9 +383,16 @@ static int run(int argc, char **argv)
     // boundary: read address, write address, write data, write enable.  Prove
     // those equal and the contents are equal by construction -- which is both
     // why the cut is sound and what checks the pairing that made it.
-    if (!mem_cuts.empty()) {
+    // Run whenever either side has a cut primitive: a design with DSPs and no block RAM has an empty memory map and used to skip all of this,
+    // so its DSPs' boundary and configuration were never looked at.
+    if (!mem_cuts.empty() || !gold.mem_ports().empty() || !gate.mem_ports().empty()) {
         const auto &gp = gold.mem_ports();
         const auto &tp = gate.mem_ports();
+        // A DSP has no read symbols to pair by.  The placement says which extracted instance each synthesis DSP became (the same map the
+        // hard-block check below uses), so pair through that.
+        std::map<std::string, const Cones::MemPort *> gold_by_where;
+        for (const auto &m : gp)
+            if (m.dsp) gold_by_where[m.where] = &m;
         // Pair by the symbol a memory's first read produces: the placement
         // already renamed the gate's to the gold's, so equal symbols are the
         // paired memories, whatever either side calls anything else.
@@ -392,14 +400,29 @@ static int run(int argc, char **argv)
         for (const auto &m : gp)
             if (!m.out_sym.empty()) by_sym[m.out_sym.front()] = &m;
         int mem_pairs = 0, mem_unpaired = 0, mem_rows = 0, mem_content_diff = 0;
+        int dsp_paired = 0, patdet_set = 0;      // for the one parameter the bitstream has no bit for (below)
+        std::set<const Cones::MemPort *> paired_gold;
         for (const auto &t : tp) {
-            if (t.out_sym.empty()) continue;
-            auto want = mem_cuts.find(t.out_sym.front());
-            if (want == mem_cuts.end()) continue;
-            auto g = by_sym.find(want->second);
-            if (g == by_sym.end()) continue;
+            const Cones::MemPort *gptr = nullptr;
+            if (t.dsp) {
+                for (const auto &[cell, hb] : hard_blocks) {
+                    if (hb.gate_name != t.where && (hb.gate_name_alt.empty() || hb.gate_name_alt != t.where)) continue;
+                    auto it = gold_by_where.find(cell);
+                    if (it != gold_by_where.end()) gptr = it->second;
+                    break;
+                }
+            } else {
+                if (t.out_sym.empty()) continue;
+                auto want = mem_cuts.find(t.out_sym.front());
+                if (want == mem_cuts.end()) continue;
+                auto g = by_sym.find(want->second);
+                if (g == by_sym.end()) continue;
+                gptr = g->second;
+            }
+            if (!gptr) continue;
+            paired_gold.insert(gptr);
             mem_pairs++;
-            const Cones::MemPort &G = *g->second;
+            const Cones::MemPort &G = *gptr;
             // The two sides list their boundary groups independently, so they
             // are paired by name.  A group only one side has is not silently
             // dropped: it is counted, because a boundary that is checked in
@@ -429,31 +452,79 @@ static int run(int argc, char **argv)
             // memory's widths and write modes, a DSP's inversion masks and
             // register enables.  Compared directly, because a boundary that
             // agrees says nothing about what the primitive does with it.
+            // A parameter a side leaves out means the primitive's default, which is not always zero (a DSP's AREG is 1), so each side's value
+            // for a row is what it says or else the default.  Canonical spelling, as in cone.cpp's cut_config.
+            static const std::map<std::string, std::string> kDspDefault = {
+                {"A_INPUT", "direct"}, {"B_INPUT", "direct"}, {"AREG", "1"}, {"ACASCREG", "1"}, {"BREG", "1"}, {"BCASCREG", "1"},
+                {"ADREG", "1"}, {"ALUMODEREG", "1"}, {"CARRYINREG", "1"}, {"CARRYINSELREG", "1"}, {"CREG", "1"}, {"DREG", "1"},
+                {"INMODEREG", "1"}, {"MREG", "1"}, {"OPMODEREG", "1"}, {"PREG", "1"}, {"USE_DPORT", "false"}, {"USE_MULT", "multiply"},
+                {"USE_SIMD", "one48"}, {"AUTORESET_PATDET", "noreset"}, {"SEL_MASK", "mask"}, {"SEL_PATTERN", "pattern"},
+                {"USE_PATTERN_DETECT", "nopatdet"}, {"MASK", "3fffffffffff"}};
+            static const std::map<std::string, std::string> kRamDefault = {
+                {"RAM_MODE", "tdp"}, {"WRITE_MODE_A", "writefirst"}, {"WRITE_MODE_B", "writefirst"},
+                {"RAM_EXTENSION_A", "none"}, {"RAM_EXTENSION_B", "none"}};
+            const auto &dflt = G.dsp ? kDspDefault : kRamDefault;
+            auto value_of = [&](const std::map<std::string, std::string> &m, const std::string &row) {
+                auto it = m.find(row);
+                if (it != m.end()) return it->second;
+                auto d = dflt.find(row);
+                return d == dflt.end() ? std::string("0") : d->second;
+            };
+            if (G.dsp) {
+                dsp_paired++;
+                if (value_of(G.contents, "USE_PATTERN_DETECT") != "nopatdet") patdet_set++;
+            }
             std::set<std::string> rows;
             for (const auto &kv : G.contents) rows.insert(kv.first);
             for (const auto &kv : t.contents) rows.insert(kv.first);
             for (const auto &r : rows) {
-                auto gi = G.contents.find(r), ti = t.contents.find(r);
-                std::string gv = gi == G.contents.end() ? "0" : gi->second;
-                std::string tv = ti == t.contents.end() ? "0" : ti->second;
+                // Not observable: a DSP's USE_PATTERN_DETECT has no bit in the bitstream (PATDET and NO_PATDET give identical bits; database
+                // FIXES.md), so there is nothing on the extraction side to hold the synthesis against.  Counted and reported below, not skipped
+                // quietly.
+                if (G.dsp && r == "USE_PATTERN_DETECT") continue;
+                std::string gv = value_of(G.contents, r);
+                std::string tv = value_of(t.contents, r);
                 // A row the synthesis left undefined -- yosys writes the
                 // unused parity rows as x -- says nothing about what the
                 // memory should hold, exactly as a don't-care pin does at the
                 // boundary.  The fabric always has some value there.
                 if (gv.find('x') != std::string::npos) continue;
+                // A port the synthesis does not have (width 0) has no width to compare: the bitstream still writes that port's
+                // width marker, at whatever the memory's width makes it, and that is not a claim about the design either.
+                if (gv == "0" && (r.rfind("READ_WIDTH_", 0) == 0 || r.rfind("WRITE_WIDTH_", 0) == 0)) continue;
                 mem_rows++;
                 if (gv == tv) continue;
                 mem_content_diff++;
-                if (mem_content_diff <= 20)
+                if (mem_content_diff <= 40)
                     std::cout << "  DIFFER  " << t.where << " " << r << ": gold " << gv
                               << ", gate " << tv << "\n";
             }
         }
         std::cout << "memories: " << gp.size() << " gold, " << tp.size() << " gate, "
                   << mem_pairs << " paired, " << mem_rows << " content rows compared\n";
+        {
+            // A cut primitive of the synthesis with no counterpart in the extraction was never compared -- not its boundary, not its
+            // configuration -- and passing it silently is how a DSP went unchecked for as long as this tool has existed.  It is unproved.
+            int unpaired = 0;
+            for (const auto &m : gp)
+                if (!paired_gold.count(&m)) unpaired++;
+            if (unpaired) {
+                std::cout << "  " << unpaired << " of " << gp.size()
+                          << " cut primitive(s) of the synthesis have no counterpart in the extraction, so their boundary and configuration were"
+                             " not compared (counted as unproved)\n";
+                unknown += unpaired;
+            }
+        }
+        if (dsp_paired)
+            std::cout << "not observable in the bitstream, so not compared: USE_PATTERN_DETECT (" << patdet_set << " of " << dsp_paired
+                      << " DSPs set it to PATDET)\n";
         if (mem_content_diff)
             std::cout << "cut primitives: " << mem_content_diff
-                      << " contents/configuration difference(s)\n";
+                      << " contents/configuration difference(s)"
+                      << (mem_content_diff > 40 ? " (the first 40 are listed)" : "") << "\n";
+        // They are differences, and are counted as such.  They used to be printed and not counted, so a RAM or DSP configured
+        // differently from its synthesis -- a width, a write mode, a cascade setting -- left the verdict at "0 differ".
+        differ += mem_content_diff;
         if (mem_unpaired)
             std::cout << "  " << mem_unpaired
                       << " boundary group(s) named on one side only, so not checked\n";

@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <iostream>
 #include "lvs/cone.hpp"
 
@@ -460,22 +461,66 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
 // whose insides nothing here models.  Values are canonicalised so the two
 // sides' spellings of the same thing compare equal -- 256'h00ab and 256'hab,
 // TRUE and "TRUE", 32'd1 and 1.
+static std::string hex_of_bits(const std::string &bits)
+{
+    std::string pad = bits;
+    if (pad.size() % 4) pad.insert(0, 4 - pad.size() % 4, '0');
+    std::string h;
+    for (size_t i = 0; i < pad.size(); i += 4) {
+        int v = 0;
+        for (int k = 0; k < 4; k++) v = (v << 1) | (pad[i + k] == '1' ? 1 : 0);
+        h += "0123456789abcdef"[v];
+    }
+    return h;
+}
+
+// A parameter's value as a canonical string, compared BY VALUE: 5'b00100, 5'h04, 5'd4 and 4 are the same number, and "READ_FIRST" and
+// READ_FIRST the same word.  Numbers are hex without leading zeros; words are lowercase without quotes or underscores.
+static std::string canon_value(std::string v)
+{
+    v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+    v.erase(std::remove(v.begin(), v.end(), '"'), v.end());
+    for (auto &c : v) c = char(std::tolower(c));
+    auto strip = [](std::string h) {
+        size_t nz = h.find_first_not_of('0');
+        return nz == std::string::npos ? std::string("0") : h.substr(nz);
+    };
+    size_t tick = v.find('\'');
+    if (tick != std::string::npos && tick + 2 <= v.size()) {
+        const char base = v[tick + 1];
+        std::string d = v.substr(tick + 2);
+        if (d.find_first_of("xz") != std::string::npos) return d;          // a synthesis don't-care stays one
+        if (base == 'b' && d.find_first_not_of("01") == std::string::npos) return strip(hex_of_bits(d));
+        if (base == 'd' && d.size() <= 19 && d.find_first_not_of("0123456789") == std::string::npos) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%llx", std::stoull(d));
+            return buf;
+        }
+        return strip(d);                                                   // 'h (or anything else): the digits as written
+    }
+    if (!v.empty() && v.size() <= 19 && v.find_first_not_of("0123456789") == std::string::npos) {   // a plain decimal number
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%llx", std::stoull(v));
+        return buf;
+    }
+    if (!v.empty() && v.find_first_not_of("0123456789abcdefx") == std::string::npos) return strip(v);
+    return v;
+}
+
+// Everything a cut hides: the contents AND the configuration of a primitive whose insides nothing here models.  Every parameter the
+// instance names is kept, zero or not: a parameter the instance leaves out means the primitive's default, which is not always zero (a DSP's
+// AREG is 1), so a dropped "0" and an absent row cannot be told apart and the comparison has to be able to see the difference.
 static std::map<std::string, std::string> cut_config(const Instance &inst)
 {
     std::map<std::string, std::string> out;
     for (const auto &pr : inst.params) {
-        std::string v = pr.value;
-        size_t tick = v.find('\'');
-        if (tick != std::string::npos && tick + 2 <= v.size()) v = v.substr(tick + 2);
-        v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
-        v.erase(std::remove(v.begin(), v.end(), '"'), v.end());
-        for (auto &c : v) c = char(std::tolower(c));
-        bool numeric = !v.empty() && v.find_first_not_of("0123456789abcdefx") == std::string::npos;
-        if (numeric) {
-            size_t nz = v.find_first_not_of('0');
-            v = nz == std::string::npos ? std::string("0") : v.substr(nz);
-        }
-        if (v != "0") out[pr.name] = v;
+        std::string v = canon_value(pr.value);
+        // The bitstream cannot tell the upper block of a cascaded pair from a RAM on its own: prjxray's RAM_EXTENSION_*_NONE_OR_UPPER is one bit,
+        // set for LOWER and clear for both, so the extraction says NONE for an UPPER and the two are the same thing here.  Likewise MULTIPLY and
+        // DYNAMIC: they give identical bitstreams (database FIXES.md, DSP48E1 USE_MULT).
+        if ((pr.name == "RAM_EXTENSION_A" || pr.name == "RAM_EXTENSION_B") && v == "upper") v = "none";
+        if (pr.name == "USE_MULT" && v == "dynamic") v = "multiply";
+        out[pr.name] = v;
     }
     return out;
 }
@@ -553,16 +598,35 @@ void Cones::collect_mem_ports()
                 // here is what makes the two descriptions meet.  It is a
                 // no-op on the fabric side, which carries no such parameter.
                 bool inv = param_str(inst, "IS_" + p.first + "_INVERTED", "1'b0").back() == '1';
+                // At width 1 a RAMB36E1 takes its write data on DIADI[0] AND DIADI[1] (and DIBDI likewise), and at width 9 the parity bit
+                // on DIPADIP[0] and DIPADIP[1]: the two 18Kb halves each take their data from their own pin, and in these modes both
+                // must carry it.  The synthesis names only bit 0; the bitstream, rightly, wires both.  So on the synthesis side the
+                // second pin is the first (it is the hardware's requirement, not a claim the designer made), and the extraction's
+                // second pin is still held to it -- a half that is not fed would show.
+                const bool is36 = inst.type == "RAMB36E1";
+                const int wa = int(width_of("WRITE_WIDTH_A")), wb = int(width_of("WRITE_WIDTH_B"));
+                const bool second_pin_copies_first =
+                    synthesis_side_ && is36 &&
+                    ((p.first == "DIADI" && wa == 1) || (p.first == "DIBDI" && wb == 1) ||
+                     (p.first == "DIPADIP" && wa == 9) || (p.first == "DIPBDIP" && wb == 9));
+                // The parity pins exist only from width 9 up: at 1, 2 and 4 the primitive does not look at them, so a value on one is
+                // not part of what the design does -- the synthesis ties them to 0 and the extraction leaves them on whatever wire
+                // reaches the pin, and neither is a claim.
+                const bool parity_unused = (p.first == "DIPADIP" && wa > 0 && wa < 9) || (p.first == "DIPBDIP" && wb > 0 && wb < 9);
                 for (int b = 0; b < n; b++) {
-                    Lit v = pp ? eval_bit(pp->conn, b, 0) : LIT_FALSE;
+                    const int sb = (second_pin_copies_first && b == 1) ? 0 : b;
+                    Lit v = pp ? eval_bit(pp->conn, sb, 0) : LIT_FALSE;
                     g.bits.push_back(inv ? negate(v) : v);
                     // A pin the synthesis did not connect is one it has no
                     // opinion about, so it is not an obligation.  The fabric
                     // always has SOMETHING on the pin -- an unrouted one sits
                     // on the interconnect pull-up -- and demanding that the
                     // two agree would fail on pins neither design uses.
-                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, b) ||
-                                         write_data_unused(p.first));
+                    // The cascade inputs of an upper block are a dedicated wire from the lower block's outputs; nothing a fabric
+                    // extraction can see, and not a net either side can name.  What decides the cascade is RAM_EXTENSION and address
+                    // bit 15, which are compared.
+                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, sb) ||
+                                         write_data_unused(p.first) || parity_unused || p.first.rfind("CASCADEIN", 0) == 0);
                 }
                 mp.boundary.push_back(std::move(g));
             }
@@ -583,6 +647,7 @@ void Cones::collect_mem_ports()
             // multiplier.
             MemPort mp;
             mp.where = inst.name;
+            mp.dsp = true;
             mp.contents = cut_config(inst);
             for (const auto &p : dsp::kDsp48e1) {
                 const Pin *pin = inst.find_pin(p.name);

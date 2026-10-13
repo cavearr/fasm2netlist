@@ -53,9 +53,13 @@ class Cones
         // RAMs with the same boundary and different contents are not the same
         // memory, and nothing else in this checker would notice.
         std::map<std::string, std::string> contents;
+        bool dsp = false;     // a DSP48E1 (else a block RAM): which defaults apply to a parameter the synthesis leaves out
     };
     // Every memory port in this module, in a stable order.  Built on demand:
     // it evaluates cones, so it cannot run before construction finishes.
+    // Say that this is the synthesis side.  A few rules about hardware the bitstream spells out and the synthesis leaves implicit
+    // (a data pin duplicated at width 1) relax only that side, so a pin the extraction fails to wire still shows.  Call before mem_ports().
+    void mark_synthesis_side() { synthesis_side_ = true; }
     const std::vector<MemPort> &mem_ports()
     {
         if (!mem_ports_built_) { mem_ports_built_ = true; collect_mem_ports(); }
@@ -137,6 +141,7 @@ class Cones
     std::map<std::string, char> mem_port_;   // gold RAMs only: which port holds it
     std::vector<MemPort> mem_ports_;
     bool mem_ports_built_ = false;
+    bool synthesis_side_ = false;                 // the synthesis, not the extraction (see mark_synthesis_side)
     void collect_mem_ports();
     // The symbol a memory's data bit reads.  Paired memories are given the
     // same one, which is the whole of how a cut point works: downstream cones
