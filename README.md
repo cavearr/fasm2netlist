@@ -308,3 +308,16 @@ present:
   confirmation at a time; (4) re-verify each seed for real once its own
   dependencies resolve. On the Johnson counter this matches all 36
   registers with zero placement input, agreeing with ground truth 36/36.
+
+## Solver
+
+`lvs_equiv` answers its equivalence questions with CaDiCaL, linked as a library (cone-only Tseitin encoding, incremental through
+assumptions).  The source is the `third_party/cadical` submodule, pinned at `rel-3.0.1`, and CMake builds it with its own
+`configure`/`make`:
+
+    git submodule update --init third_party/cadical
+    cmake -S . -B build && cmake --build build
+
+An installed copy is used instead if `-DCADICAL_ROOT=<prefix>` (with `include/cadical.hpp` and `lib/libcadical.a`) is given.  Without
+either, the linked Z3 (`--solver libz3`) or any command (`--solver 'kissat'` with `--format dimacs`) still works.  On `vc707-ocaml`
+(19250 questions) CaDiCaL takes 140 s where Z3 took 2968 s.
