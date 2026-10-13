@@ -35,6 +35,7 @@
 
 #include "bram_ports.hpp"
 #include "dsp_ports.hpp"
+#include "gtpins.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -2123,6 +2124,46 @@ endmodule
     }
     if (!ddr_sites.empty())
         std::cerr << "  DDR registers cut at their boundary: " << ddr_sites.size() << "\n";
+
+    // ---- the transceiver's parallel outputs ----------------------------
+    // Not modelled, but its RXDATA, RXCHARISK, RXRESETDONE and the rest are Boolean signals the fabric samples.  Left alone they sit on
+    // the pull-up and read as constant 1.  Emitting the block with just those pins makes them a cut point the placement can pair with
+    // the synthesis's own.  Bits the routing never touches are left out of the bus (they feed nothing).
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        if (ti == tiles.end() || ti->second.type.rfind("GTX_CHANNEL", 0) != 0) continue;
+        std::map<std::string, std::map<int, std::string>> bus;      // pin -> bit -> wire
+        std::map<std::string, int> single;
+        for (const auto &pins : site_pins[ti->second.type])
+            for (const auto &pw : pins) {
+                std::string base = pw.first;
+                int bit = -1;
+                size_t d = base.size();
+                while (d > 0 && isdigit((unsigned char)base[d - 1])) d--;
+                if (d < base.size() && d > 0) { bit = atoi(base.c_str() + d); base.resize(d); }
+                if (!lvs::gtx_channel_out(base) && !lvs::gtx_channel_out(pw.first)) continue;
+                if (lvs::gtx_channel_out(pw.first)) { base = pw.first; bit = -1; }
+                bus[base][bit < 0 ? 0 : bit] = pw.second;
+            }
+        std::ostringstream o;
+        bool any = false;
+        for (const auto &b : bus) {
+            int hi = b.second.rbegin()->first;
+            std::string cat;
+            bool touched = false;
+            for (int i = hi; i >= 0; i--) {
+                auto w = b.second.find(i);
+                std::string raw = w == b.second.end() ? "" : tw(kv.first, w->second);
+                bool known = !raw.empty() && dsu.parent.count(raw);
+                if (known) { driven_raw.insert(raw); touched = true; }
+                cat += (cat.empty() ? "" : ", ") + (known ? emit_net(raw) : std::string("1'b0"));
+            }
+            if (!touched) continue;
+            o << (any ? ", " : "") << "." << b.first << "({" << cat << "})";
+            any = true;
+        }
+        if (any) body << "  GTXE2_CHANNEL \\" << sanitise(kv.first + "_GTXE2_CHANNEL") << " (" << o.str() << ");\n";
+    }
 
     // ---- the clock manager's LOCKED pin --------------------------------
     // The MMCM itself is not modelled and cannot usefully be: what comes out

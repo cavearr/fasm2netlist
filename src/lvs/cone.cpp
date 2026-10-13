@@ -4,6 +4,7 @@
 
 #include "bram_ports.hpp"
 #include "dsp_ports.hpp"
+#include "gtpins.hpp"
 
 #include <cstdlib>
 #include <stdexcept>
@@ -109,6 +110,7 @@ bool is_bram(const std::string &t) { return t == "RAMB18E1" || t == "RAMB36E1"; 
 // The DSP, cut the same way and for the same reason: nothing here models a
 // multiply-accumulate, so its results are freed and its operands obliged.
 bool is_dsp(const std::string &t) { return t == "DSP48E1"; }
+bool is_gtx(const std::string &t) { return t == "GTXE2_CHANNEL"; }
 // A block RAM's data outputs: the pins a cut turns into free variables.
 bool bram_data_out(const std::string &pin)
 {
@@ -362,7 +364,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
                           (RAM_SINGLE.count(inst.type) && pin.name == "O") ||
                           (is_bram(inst.type) && bram_data_out(pin.name)) ||
-                          (is_dsp(inst.type) && dsp::is_data_out(pin.name.c_str()));
+                          (is_dsp(inst.type) && dsp::is_data_out(pin.name.c_str())) ||
+                          (is_gtx(inst.type) && gtx_channel_out(pin.name));
             if (!is_out)
                 continue;
             // A memory's data output is a BUS, and every bit of it has to
@@ -383,6 +386,8 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
             } else if (is_dsp(inst.type)) {
                 for (const auto &p2 : dsp::kDsp48e1)
                     if (pin.name == p2.name) mem_width = std::max(p2.width, 1);
+            } else if (is_gtx(inst.type)) {
+                mem_width = std::max(expr_width(pin.conn), 1);
             } else if (RAM_SINGLE.count(inst.type) && pin.name == "O") {
                 mem_width = 1;
             } else if (!memory_as_state_ && RAM_PORTS.count(inst.type) &&

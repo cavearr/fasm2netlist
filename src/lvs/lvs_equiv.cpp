@@ -32,11 +32,12 @@ namespace {
 void usage()
 {
     std::cerr << "usage: lvs_equiv --gold <a.v> --gate <b.v> [--top NAME]\n"
-                 "                 [--solver libz3|'cmd'] [--format dimacs|smt2]\n"
+                 "                 [--solver libcadical|libz3|'cmd'] [--format dimacs|smt2]\n"
                  "                 [--dump-prefix PATH] [--quiet] [--explain] [--only TEXT]\n"
                  "\n"
-                 "  --solver libz3  the linked library, one incremental session"
-              << (have_linked_z3() ? " (default)\n" : " -- NOT IN THIS BUILD\n")
+                 "  --solver libcadical  the linked CaDiCaL (default when built with it)\n"
+              "  --solver libz3  the linked library, one incremental session"
+              << (have_linked_z3() ? (have_linked_cadical() ? "\n" : " (default)\n") : " -- NOT IN THIS BUILD\n")
               << "  --solver <cmd>  any binary reading the chosen format, run per question\n";
 }
 
@@ -57,7 +58,7 @@ static int run(int argc, char **argv)
     std::string gold_path, gate_path, top = "top", gold_top, gate_top, dump_prefix, map_path;
     std::vector<std::pair<std::string, std::string>> compare;   // arbitrary net pairs
     std::string placement_p, gold_json_p, db, device;
-    Solver solver{have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
+    Solver solver{have_linked_cadical() ? linked_cadical_name() : have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
     bool quiet = false;
     // --explain: after a failure, say which named variables each side reads.
     bool explain = false;
@@ -259,6 +260,8 @@ static int run(int argc, char **argv)
     std::cout << "solver: " << session->describe() << "\n\n";
 
     int proved = 0, differ = 0, unknown = 0;
+    double solver_secs = 0;
+    int trivial = 0, asked = 0;
     auto t0 = std::chrono::steady_clock::now();
 
     // Which named variables a cone actually reads.  A miter that fails says
@@ -298,7 +301,15 @@ static int run(int argc, char **argv)
             std::ofstream(dump_prefix + safe + (solver.format == Format::Dimacs ? ".cnf" : ".smt2"))
                 << emit(net, miter, solver.format);
         }
-        Result r = session->check(miter);
+        auto ts = std::chrono::steady_clock::now();
+        // A miter that structural hashing has already folded to the constant 0 is proved (and to the constant 1, refuted): no solver is
+        // needed, and on a design whose two sides came from the same netlist that is nearly every question.
+        Result r = miter == 0 ? Result::Unsat : session->check(miter);
+        solver_secs += std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count();
+        if (miter == 0) trivial++;
+        else if (getenv("LVS_PROFILE"))
+            std::cerr << "  [solve " << std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count() << "s] " << label << "\n";
+        asked++;
         if (r == Result::Unsat) { proved++; if (!quiet) std::cout << "  proved  " << label << "\n"; }
         else if (r == Result::Sat) {
             differ++;
@@ -593,6 +604,7 @@ static int run(int argc, char **argv)
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "\n" << proved << " proved, " << differ << " differ, " << unknown << " unknown"
               << "   (" << secs << "s)\n";
+    std::cout << "solver time " << solver_secs << "s over " << asked << " questions (" << trivial << " already constant after structural hashing)\n";
     // A broken loop is not a detail of the run, it is a caveat on its verdict:
     // the constant it leaves behind deletes a dependency, so a cone can prove
     // -- or differ -- for want of an input rather than on the merits.  Say so

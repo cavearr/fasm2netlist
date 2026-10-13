@@ -58,6 +58,22 @@ else()
   message(STATUS "lvs: LVS_Z3=OFF; solvers will be run as commands")
 endif()
 
+# CaDiCaL, the preferred solver when it can be linked: the miters are pure Boolean, and a CDCL solver over a Tseitin encoding answers
+# them several times faster than Z3.  Looked for under CADICAL_ROOT (include/cadical.hpp, lib/libcadical.a) or on the default paths.
+option(LVS_CADICAL "Link CaDiCaL when it is available" ON)
+if(LVS_CADICAL)
+  find_path(CADICAL_INCLUDE_DIR cadical.hpp HINTS ${CADICAL_ROOT}/include $ENV{CADICAL_ROOT}/include)
+  find_library(CADICAL_LIBRARY NAMES cadical HINTS ${CADICAL_ROOT}/lib $ENV{CADICAL_ROOT}/lib)
+  if(CADICAL_INCLUDE_DIR AND CADICAL_LIBRARY)
+    target_include_directories(lvs_miter PUBLIC ${CADICAL_INCLUDE_DIR})
+    target_link_libraries(lvs_miter PUBLIC ${CADICAL_LIBRARY})
+    target_compile_definitions(lvs_miter PUBLIC LVS_HAVE_CADICAL)
+    message(STATUS "lvs: linking ${CADICAL_LIBRARY}")
+  else()
+    message(STATUS "lvs: no CaDiCaL found (set CADICAL_ROOT); using Z3 or a command")
+  endif()
+endif()
+
 # Structural Verilog reader, generated from src/lvs/verilog.{l,y}.  flex and
 # bison are code generators, not link-time dependencies -- the sources they
 # emit are self-contained C++ -- so this keeps the "no external libraries"

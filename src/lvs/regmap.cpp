@@ -4,6 +4,7 @@
 
 #include "bram_ports.hpp"
 #include "dsp_ports.hpp"
+#include "gtpins.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -423,6 +424,17 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
                             out.mem[hb.gate_name + suffix] = cv.first + suffix;
                         }
                     }
+                }
+            } else if (bel == "GTXE2_CHANNEL") {
+                // The extraction emits the transceiver as a stub carrying its parallel outputs (see gtpins.hpp); name it as the tile
+                // model does and join each output bit to the synthesis cell's, so the two cuts are one variable.
+                hb.gate_name = sanitise(tile + "_GTXE2_CHANNEL");
+                for (const auto &pc : cv.second.get("connections").members()) {
+                    if (!gtx_channel_out(pc.first)) continue;
+                    const auto &bits = pc.second.items();
+                    for (size_t b = 0; b < bits.size(); b++)
+                        out.mem[hb.gate_name + ":" + pc.first + "[" + std::to_string(b) + "]"] =
+                            cv.first + ":" + pc.first + "[" + std::to_string(b) + "]";
                 }
             } else if (bel == "IDDR" || bel == "ODDR" || bel == "ISERDESE2" ||
                        bel == "OSERDESE2") {
