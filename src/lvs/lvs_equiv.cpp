@@ -372,6 +372,23 @@ static int run(int argc, char **argv)
         if (!only.empty() && g.find(only) == std::string::npos) continue;
         check(g == t ? g : (g + " = " + t), gold.next_state(g), gate.next_state(t));
     }
+    // Clock polarity of every matched register: configuration, like a RAM's width.  The proof itself has no edges, so the edge a register
+    // captures on is held against the bitstream here.  (Which clock net drives it is a separate question -- clocks are assumed common.)
+    {
+        int pol_rows = 0, pol_diff = 0;
+        for (const auto &[g, t] : common) {
+            int gp = gold.clock_inverted(g), tp = gate.clock_inverted(t);
+            if (gp < 0 || tp < 0) continue;
+            pol_rows++;
+            if (gp == tp) continue;
+            pol_diff++;
+            differ++;
+            if (pol_diff <= 40)
+                std::cout << "  DIFFER  " << (g == t ? g : g + " = " + t) << " clock edge: gold "
+                          << (gp ? "falling" : "rising") << ", gate " << (tp ? "falling" : "rising") << "\n";
+        }
+        std::cout << "register clock edge: " << pol_rows << " compared, " << pol_diff << " differ\n";
+    }
     auto gate_outs = gate.output_bits();
     for (const auto &[port, bit] : gold.output_bits()) {
         // The two sides need not agree on bus-ness: gold declares an 8-bit

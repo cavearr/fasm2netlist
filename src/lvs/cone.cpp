@@ -1414,6 +1414,17 @@ Lit Cones::next_state(const std::string &state_name)
     return next;
 }
 
+int Cones::clock_inverted(const std::string &state) const
+{
+    auto it = ff_by_state_.find(state);
+    if (it == ff_by_state_.end()) return -1;
+    const Instance &ff = *it->second;
+    if (is_xcol(ff.type)) return param_str(ff, "CLK_INV", "0").back() == '1' ? 1 : 0;
+    const bool by_type = ff.type.size() > 2 && ff.type.compare(ff.type.size() - 2, 2, "_1") == 0;
+    const bool by_param = param_str(ff, "IS_C_INVERTED", "0").back() == '1';
+    return (by_type != by_param) ? 1 : 0;
+}
+
 Lit Cones::output_bit(const std::string &port, int bit)
 {
     for (const auto &p : mod_.ports)

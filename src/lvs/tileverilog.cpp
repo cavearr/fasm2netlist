@@ -1247,7 +1247,7 @@ module xcol #(
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
-    parameter SYNC = 1'b1,
+    parameter SYNC = 1'b1, parameter CLK_INV = 1'b0,
     parameter FF_THRU = 1'b0,     // the main register is a latch held open: Q = D
     // A column of a deeper distributed RAM.  A 128- or 256-deep single-port
     // RAM spans two or four columns of one slice: each holds 64 of the words,
@@ -1641,7 +1641,7 @@ endmodule
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
                << "), .FF5_INIT(1'b" << col.ff5_init << "), .FF5_SRVAL(1'b" << col.ff5_srval
-               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
+               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .CLK_INV(1'b" << (sc.clkinv ? 1 : 0) << "), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
                << "), .DEPTH(" << depth << "), .GROUP(\"" << group << "\"), .GOUT(\"" << gout << "\"))\n"
                << "    \\" << inst_name(sc.tile, sc.site, C, raw(C + "Q"), raw(C + "MUX")) << " (";
             for (int i = 1; i <= 6; i++) body << ".A" << i << "(" << net(C + std::to_string(i)) << "), ";

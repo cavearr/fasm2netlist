@@ -102,6 +102,9 @@ class Cones
     // that broke any is a run in which some cone lost a dependency, so
     // a proof from it is conditional on those loops being unreachable.
     int loops_broken() const { return loops_seen_; }
+    // The edge a register captures on: 1 for the falling edge.  A synthesis register says so with its type (FDRE_1 and the other _1 variants)
+    // or IS_C_INVERTED; an extracted one with its slice's CLKINV bit.  -1 if `state` is not a register here.
+    int clock_inverted(const std::string &state) const;
     std::vector<std::pair<std::string, int>> output_bits() const;
 
   private:
