@@ -14,8 +14,12 @@ namespace lvs {
 
 namespace {
 
-const std::set<std::string> FF_TYPES = {"FDRE", "FDSE", "FDCE", "FDPE"};
-const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "BUFG", "IBUFDS", "OBUFDS"};
+// The _1 variants capture on the falling edge.  The proof has no notion of an edge (clocks are assumed common), so they are the same
+// register as far as the next state goes; without them a negative-edge flop's output was a free variable on the synthesis side and a state
+// on the extraction side.
+const std::set<std::string> FF_TYPES = {"FDRE", "FDSE", "FDCE", "FDPE", "FDRE_1", "FDSE_1", "FDCE_1", "FDPE_1"};
+// OBUFT: the output follows I; its tri-state enable T is not compared (a tri-stated pad does not hold a Boolean value, as for an inout).
+const std::set<std::string> PASSTHROUGH = {"IBUF", "OBUF", "OBUFT", "BUFG", "IBUFDS", "OBUFDS"};
 // A bidirectional buffer's O pin carries what the pad is receiving, which
 // comes from the pad and not from anything inside the design.  Treating it as
 // a connection to the IO pin lets it resolve to the port the constraints name,
@@ -632,7 +636,11 @@ void Cones::collect_mem_ports()
                     // The cascade inputs of an upper block are a dedicated wire from the lower block's outputs; nothing a fabric
                     // extraction can see, and not a net either side can name.  What decides the cascade is RAM_EXTENSION and address
                     // bit 15, which are compared.
-                    g.dontcare.push_back(!pp || bit_is_dontcare(pp->conn, sb) ||
+                    // WEBWE[7:4] are the upper byte enables of the 72-bit simple-dual-port write; in TDP mode, at any width up to 36, they are
+                    // not looked at, and nextpnr does not route them (the synthesis ties all eight to one net).
+                    const bool webwe_upper_unused = is36 && p.first == "WEBWE" && b >= 4 &&
+                                                    param_str(inst, "RAM_MODE", "TDP") != "SDP";
+                    g.dontcare.push_back(webwe_upper_unused || !pp || bit_is_dontcare(pp->conn, sb) ||
                                          write_data_unused(p.first) || parity_unused || p.first.rfind("CASCADEIN", 0) == 0 ||
                                          (is36 && b == 15 && (p.first == "ADDRARDADDR" || p.first == "ADDRBWRADDR") &&
                                           param_str(inst, p.first == "ADDRARDADDR" ? "RAM_EXTENSION_A" : "RAM_EXTENSION_B", "NONE") != "LOWER" &&
@@ -1388,16 +1396,18 @@ Lit Cones::next_state(const std::string &state_name)
     // CE low holds the current value
     Lit next = net_.mk_or(net_.mk_and(ce, d), net_.mk_and(negate(ce), q));
 
-    if (ff.type == "FDRE") {
+    std::string ff_type = ff.type;
+    if (ff_type.size() > 2 && ff_type.compare(ff_type.size() - 2, 2, "_1") == 0) ff_type.resize(ff_type.size() - 2);
+    if (ff_type == "FDRE") {
         Lit r = pin_lit("R", LIT_FALSE);
         next = net_.mk_and(negate(r), next);
-    } else if (ff.type == "FDSE") {
+    } else if (ff_type == "FDSE") {
         Lit s = pin_lit("S", LIT_FALSE);
         next = net_.mk_or(s, next);
-    } else if (ff.type == "FDCE") {
+    } else if (ff_type == "FDCE") {
         Lit clr = pin_lit("CLR", LIT_FALSE);
         next = net_.mk_and(negate(clr), next);
-    } else if (ff.type == "FDPE") {
+    } else if (ff_type == "FDPE") {
         Lit pre = pin_lit("PRE", LIT_FALSE);
         next = net_.mk_or(pre, next);
     }

@@ -503,6 +503,13 @@ static int run(int argc, char **argv)
                 // A port the synthesis does not have (width 0) has no width to compare: the bitstream still writes that port's
                 // width marker, at whatever the memory's width makes it, and that is not a claim about the design either.
                 if (gv == "0" && (r.rfind("READ_WIDTH_", 0) == 0 || r.rfind("WRITE_WIDTH_", 0) == 0)) continue;
+                // A clock's polarity is only meaningful for a port the synthesis uses; the tag of an unused port is whatever the placer left.
+                if (!G.dsp && (r == "IS_CLKARDCLK_INVERTED" || r == "IS_CLKBWRCLK_INVERTED")) {
+                    const char ab = r == "IS_CLKARDCLK_INVERTED" ? 'A' : 'B';
+                    if (value_of(G.contents, std::string("READ_WIDTH_") + ab) == "0" &&
+                        value_of(G.contents, std::string("WRITE_WIDTH_") + ab) == "0")
+                        continue;
+                }
                 mem_rows++;
                 if (gv == tv) continue;
                 mem_content_diff++;

@@ -1814,6 +1814,10 @@ endmodule
                 str((std::string("RAM_EXTENSION_") + ab).c_str(),
                     has("RAMB36", std::string("RAM_EXTENSION_") + ab + "_LOWER") ? "LOWER" : "NONE");
         }
+        // A clock's polarity is configuration the cut cannot see (clock pins are not compared): a RAM that captures on the falling edge reads
+        // differently from one that does not.  (The REGCLK pins are left out: when the output register is unused their tag is absent whatever the design says.)  prjxray stores each inversion complemented, so the clock is inverted when its ZINV tag is absent.
+        for (const char *pin : {"CLKARDCLK", "CLKBWRCLK"})
+            ps.push_back(std::string(".IS_") + pin + "_INVERTED(1'b" + (has(lo, std::string("ZINV_") + pin) ? "0" : "1") + ")");
         return ps;
     };
     int brams = 0, bram_rows = 0;
