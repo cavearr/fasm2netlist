@@ -111,6 +111,7 @@ static int run(int argc, char **argv)
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
     std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
+    std::map<std::string, std::string> bufg_site;  // gold BUFG cell -> its BUFGCTRL site
     std::map<std::string, lvs::RegMap::HardBlock> hard_blocks;
     std::map<std::string, std::vector<std::string>> gate_alts;  // other names for the same net
 
@@ -127,6 +128,7 @@ static int run(int argc, char **argv)
         for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
         for (const auto &kv : rm.alt) gate_alts[sanitise(kv.first)] = kv.second;
         mem_cuts = rm.mem;
+        bufg_site = rm.bufg_site;
         hard_blocks = rm.hard;
         if (!mem_cuts.empty())
             std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
@@ -388,6 +390,41 @@ static int run(int argc, char **argv)
                           << (gp ? "falling" : "rising") << ", gate " << (tp ? "falling" : "rising") << "\n";
         }
         std::cout << "register clock edge: " << pol_rows << " compared, " << pol_diff << " differ\n";
+    }
+    // Which BUFG clocks each matched register.  The extraction traces it only under --routed-clock; without that every register reads as not
+    // traced and the row is skipped.  A synthesis register driven by something other than a BUFG (a clock straight from a pad or a BUFR) has no
+    // BUFG to compare, so it is counted but not held against the extraction.
+    {
+        int src_rows = 0, src_diff = 0, untraced = 0, no_bufg = 0;
+        std::vector<std::pair<std::string, std::string>> untraced_regs;   // registers whose clock the extraction could not trace
+        for (const auto &[g, t] : common) {
+            if (gold.clock_inverted(g) < 0 || gate.clock_inverted(t) < 0) continue;
+            std::string gc = gold.clock_source(g), tc = gate.clock_source(t);
+            if (gc.empty()) { no_bufg++; continue; }
+            if (tc.empty()) { untraced++; untraced_regs.emplace_back(g, t); continue; }
+            auto site = bufg_site.find(gc);
+            std::string gs = site == bufg_site.end() ? gc : site->second;
+            src_rows++;
+            if (gs == tc) continue;
+            src_diff++;
+            differ++;
+            if (src_diff <= 40)
+                std::cout << "  DIFFER  " << (g == t ? g : g + " = " + t) << " clock source: gold " << gc << " (" << gs << "), gate " << tc << "\n";
+        }
+        // With the clock tree traced for most registers, one it could not trace is not "unknown": its clock pin reaches no BUFG, which is either
+        // a missing pip or a clock the design does not have.  Without --routed-clock nothing is traced and the row is not applicable.
+        if (src_rows > 0 && !untraced_regs.empty()) {
+            for (size_t i = 0; i < untraced_regs.size(); i++) {
+                differ++;
+                src_diff++;
+                if (i < 40)
+                    std::cout << "  DIFFER  " << untraced_regs[i].first << " = " << untraced_regs[i].second
+                              << " clock source: gold has a BUFG, the extraction's clock reaches none\n";
+            }
+            untraced = 0;
+        }
+        std::cout << "register clock source: " << src_rows << " compared, " << src_diff << " differ (" << untraced
+                  << " not traced in the extraction, " << no_bufg << " not driven by a BUFG in the synthesis)\n";
     }
     auto gate_outs = gate.output_bits();
     for (const auto &[port, bit] : gold.output_bits()) {

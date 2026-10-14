@@ -1247,7 +1247,7 @@ module xcol #(
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
-    parameter SYNC = 1'b1, parameter CLK_INV = 1'b0,
+    parameter SYNC = 1'b1, parameter CLK_INV = 1'b0, parameter CLK_SRC = "",
     parameter FF_THRU = 1'b0,     // the main register is a latch held open: Q = D
     // A column of a deeper distributed RAM.  A 128- or 256-deep single-port
     // RAM spans two or four columns of one slice: each holds 64 of the words,
@@ -1391,6 +1391,33 @@ endmodule
     // union, since a root recorded earlier may since have been merged away.
     std::set<std::string> read_roots;
     for (const auto &w : real_pip_sources) read_roots.insert(dsu.find(w));
+    // ---- which BUFG drives a register's clock --------------------------------
+    // Only meaningful with --routed-clock, which keeps the clock tree's pips as assigns: a slice's clock is walked back through them (one driver
+    // per net) to the first BUFGCTRL output, whose site name is then the register's clock source.  Names the site as the placement does,
+    // BUFGCTRL_X0Y<n>, with the TOP half of the column numbered from 16.
+    std::map<std::string, std::string> clk_src_of_root, bufg_site_of_root;
+    if (!simple_clock) {
+        for (const auto &a : assigns) clk_src_of_root.emplace(dsu.find(a.first), dsu.find(a.second));
+        for (const auto &o : bufg_outs) {
+            auto pos = o.find("BUFGCTRL");
+            if (pos == std::string::npos) continue;
+            int n = atoi(o.c_str() + pos + 8);
+            bool top = o.find("CLK_BUFG_TOP") != std::string::npos;
+            bufg_site_of_root[dsu.find(o)] = "BUFGCTRL_X0Y" + std::to_string(n + (top ? 16 : 0));
+        }
+    }
+    auto clock_source_of = [&](const std::string &clk_raw) -> std::string {
+        if (simple_clock || clk_raw.empty()) return "";
+        std::string x = dsu.find(clk_raw);
+        for (int hops = 0; hops < 400; hops++) {
+            auto b = bufg_site_of_root.find(x);
+            if (b != bufg_site_of_root.end()) return b->second;
+            auto n = clk_src_of_root.find(x);
+            if (n == clk_src_of_root.end() || n->second == x) return "";
+            x = n->second;
+        }
+        return "";
+    };
     for (const auto &kv : dc.slices) {
         const SliceConfig &sc = kv.second;
         auto ti = tiles.find(sc.tile);
@@ -1641,7 +1668,7 @@ endmodule
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
                << "), .FF5_INIT(1'b" << col.ff5_init << "), .FF5_SRVAL(1'b" << col.ff5_srval
-               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .CLK_INV(1'b" << (sc.clkinv ? 1 : 0) << "), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
+               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .CLK_INV(1'b" << (sc.clkinv ? 1 : 0) << "), .CLK_SRC(\"" << clock_source_of(raw("CLK")) << "\"), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
                << "), .DEPTH(" << depth << "), .GROUP(\"" << group << "\"), .GOUT(\"" << gout << "\"))\n"
                << "    \\" << inst_name(sc.tile, sc.site, C, raw(C + "Q"), raw(C + "MUX")) << " (";
             for (int i = 1; i <= 6; i++) body << ".A" << i << "(" << net(C + std::to_string(i)) << "), ";

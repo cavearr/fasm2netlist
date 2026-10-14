@@ -355,6 +355,10 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         // cannot see it by construction.
         for (const auto &cv : mod->get("cells").members()) {
             std::string bel = cv.second.get("type").asString();
+            if (bel.rfind("BUFG", 0) == 0) {
+                const json::Value &pb = place.get(cv.first);
+                if (!pb.isNull()) out.bufg_site[cv.first] = pb.get("site").asString();
+            }
             if (!kHardBels.count(bel)) continue;
             RegMap::HardBlock hb;
             hb.type = bel;

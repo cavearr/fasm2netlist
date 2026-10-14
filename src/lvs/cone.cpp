@@ -1425,6 +1425,22 @@ int Cones::clock_inverted(const std::string &state) const
     return (by_type != by_param) ? 1 : 0;
 }
 
+std::string Cones::clock_source(const std::string &state) const
+{
+    auto it = ff_by_state_.find(state);
+    if (it == ff_by_state_.end()) return "";
+    const Instance &ff = *it->second;
+    if (is_xcol(ff.type)) return param_str(ff, "CLK_SRC", "");
+    const Pin *c = ff.find_pin("C");
+    if (!c) return "";
+    std::string n = net_of_bit(c->conn, 0);
+    if (n.empty()) return "";
+    auto d = driver_.find(n);
+    if (d == driver_.end()) d = driver_.find(resolve(n));
+    if (d == driver_.end() || !d->second.inst) return "";
+    return d->second.inst->type.rfind("BUFG", 0) == 0 ? d->second.inst->name : std::string();
+}
+
 Lit Cones::output_bit(const std::string &port, int bit)
 {
     for (const auto &p : mod_.ports)

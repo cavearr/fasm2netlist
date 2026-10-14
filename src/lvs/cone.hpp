@@ -105,6 +105,9 @@ class Cones
     // The edge a register captures on: 1 for the falling edge.  A synthesis register says so with its type (FDRE_1 and the other _1 variants)
     // or IS_C_INVERTED; an extracted one with its slice's CLKINV bit.  -1 if `state` is not a register here.
     int clock_inverted(const std::string &state) const;
+    // The BUFG that clocks a register: for a synthesis register the name of the BUFG cell on its C net, for an extracted one the BUFGCTRL site
+    // its slice's clock was traced to (CLK_SRC).  Empty when not known (not traced, or not driven by a BUFG).
+    std::string clock_source(const std::string &state) const;
     std::vector<std::pair<std::string, int>> output_bits() const;
 
   private:
