@@ -95,10 +95,16 @@ equivalence check cannot help.
 
 Three things are assumed rather than reconstructed, and each is deliberate:
 
-- **The clock tree.** With one BUFG in the design there is only one thing a
-  clock pin can be, so they are joined to it. `--routed-clock` turns that off.
-  Clock pins are therefore not obligations, for the same reason a flip-flop's
-  `C` is never compared.
+- **The clock tree** is *not* assumed by default: the clock-tree pips are kept,
+  each slice clock is followed to the BUFG that drives it, and each BUFG's input
+  is followed to its source (an MMCM/PLL output, a transceiver clock, a pad or a
+  slice).  The LVS holds register clock edge, register clock source and BUFG
+  input source against the synthesis.  A BUFG whose input reaches it through a
+  LUT and general routing instead of the MMCM output is a difference; a pad
+  clock routed through the fabric is a note.  Costs about 15% more extraction
+  time and memory.  `--simple-clock` restores the old simplification (one BUFG:
+  every clock pin joined to it, clock pins not obligations, and none of those
+  three rows run); `--routed-clock` is accepted and does nothing.
 - **The MMCM's configuration.** A frequency is not a Boolean fact. Its `LOCKED`
   pin *is*, and is cut like any other hard-block output -- which matters
   because a reset synchroniser waits on it.

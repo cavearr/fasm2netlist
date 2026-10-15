@@ -124,7 +124,7 @@ int main(int argc, char **argv)
     std::string placement_path, gold_json_path;
     std::vector<std::string> input_pats;   // substrings naming genuinely external nets
     int hops = 0;                          // rounds of reachability growth
-    bool simple_clock = true;              // see the note on the clock tree below
+    bool simple_clock = false;             // --simple-clock; see the note on the clock tree below
     bool use_default_ppips = false;        // `default` ppips: off until justified
     int pullup = 1;                        // value an undriven routing net reads
     // --timing: every routing assign carries the database's transport delay
@@ -145,7 +145,8 @@ int main(int argc, char **argv)
         else if (a == "--part") part = next();
         else if (a == "--input") input_pats.push_back(next());
         else if (a == "--hops") hops = atoi(next().c_str());
-        else if (a == "--routed-clock") simple_clock = false;
+        else if (a == "--routed-clock") simple_clock = false;   // the default; kept so existing command lines work
+        else if (a == "--simple-clock") simple_clock = true;
         else if (a == "--pullup") pullup = atoi(next().c_str());
         else if (a == "--default-ppips") use_default_ppips = true;
         else if (a == "--placement") placement_path = next();
@@ -617,7 +618,7 @@ int main(int argc, char **argv)
     // FASM, which leaves the chain in pieces however the net graph is grown.
     // Treating the buffer output as the clock source is what the rest of the
     // toolchain does too, and it is honest about being a simplification --
-    // --routed-clock turns it off and leaves the pieces visible.
+    // --simple-clock turns it on; by default the pieces stay visible.
     std::vector<std::string> bufg_outs;
     for (const auto &kv : dc.other_tiles) {
         if (kv.first.rfind("CLK_BUFG", 0) != 0) continue;
