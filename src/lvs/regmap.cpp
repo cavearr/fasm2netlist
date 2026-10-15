@@ -353,11 +353,50 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         // was dropped along the way is simply not in it -- which is precisely
         // the case worth catching, and a census built from the placement
         // cannot see it by construction.
+        // Which cell output drives each net bit, to follow a BUFG's input back to its source.
+        auto bitkey = [](const json::Value &v) { return v.isString() ? v.asString() : std::to_string(v.asInt()); };
+        std::map<std::string, std::pair<std::string, std::string>> driver;      // bit -> (cell, port)
+        for (const auto &cv : mod->get("cells").members())
+            for (const auto &pd : cv.second.get("port_directions").members())
+                if (pd.second.asString() == "output")
+                    for (const auto &b : cv.second.get("connections").get(pd.first).items())
+                        if (!b.isString() || (b.asString() != "0" && b.asString() != "1" && b.asString() != "x"))
+                            driver[bitkey(b)] = {cv.first, pd.first};
         for (const auto &cv : mod->get("cells").members()) {
             std::string bel = cv.second.get("type").asString();
             if (bel.rfind("BUFG", 0) == 0) {
                 const json::Value &pb = place.get(cv.first);
-                if (!pb.isNull()) out.bufg_site[cv.first] = pb.get("site").asString();
+                if (!pb.isNull()) {
+                    out.bufg_site[cv.first] = pb.get("site").asString();
+                    for (const char *ip : {"I", "I0"}) {
+                        const auto &bits = cv.second.get("connections").get(ip).items();
+                        if (bits.empty()) continue;
+                        auto d = driver.find(bitkey(bits[0]));
+                        if (d == driver.end()) break;
+                        const json::Value *pdp = &place.get(d->second.first);
+                        // An IBUF/IBUFDS is merged into the pad by the packer and has no placement of its own: its pad's does.
+                        if (pdp->isNull() && cv.second.get("type").asString() != "" ) {
+                            const std::string dty = mod->get("cells").get(d->second.first).get("type").asString();
+                            if (dty.rfind("IBUF", 0) == 0) {
+                                const auto &ib = mod->get("cells").get(d->second.first).get("connections").get("I").items();
+                                if (!ib.empty())
+                                    for (const auto &nn : mod->get("netnames").members())
+                                        for (const auto &nb : nn.second.get("bits").items())
+                                            if (bitkey(nb) == bitkey(ib[0]) && !place.get(nn.first).isNull() &&
+                                                place.get(nn.first).get("type").asString() == "PAD") {
+                                                pdp = &place.get(nn.first);
+                                                break;
+                                            }
+                            }
+                        }
+                        if (pdp->isNull()) break;
+                        const json::Value &pd = *pdp;
+                        std::string dbel = pd.get("bel").asString(), port = d->second.second;
+                        bool named = dbel.rfind("MMCME2", 0) == 0 || dbel.rfind("PLLE2", 0) == 0 || dbel.rfind("GTXE2", 0) == 0;
+                        out.bufg_src[pb.get("site").asString()] = pd.get("tile").asString() + " " + (named ? port : std::string("-"));
+                        break;
+                    }
+                }
             }
             if (!kHardBels.count(bel)) continue;
             RegMap::HardBlock hb;

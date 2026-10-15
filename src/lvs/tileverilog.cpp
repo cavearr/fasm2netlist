@@ -2523,6 +2523,64 @@ endmodule
     for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
     for (const auto &w : helper_wires) os << "  wire " << w << ";\n";
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
+    // ---- what feeds each BUFG ------------------------------------------------
+    // With the clock tree traced, a BUFGCTRL's input is followed back through the same one-driver-per-net assigns to the first net that
+    // nothing drives, whose tile and pin name the source: an MMCM output, a transceiver's TXOUTCLK/RXOUTCLK, or (for a clock made in
+    // logic) a slice output.  Written as comment lines the LVS reads: "// lvs-bufg-src <site> <tile> <pin> <fabric|dedicated>": "-" for no pin; the last word says whether the path crossed general routing.
+    if (!simple_clock) {
+        std::map<std::string, std::string> bufg_in;     // BUFGCTRL site -> traced terminal root
+        std::map<std::string, bool> bufg_fabric;        // ...and whether the path went through the general routing (INT tiles)
+        for (const auto &o : bufg_outs) {
+            auto pos = o.find("BUFGCTRL");
+            if (pos == std::string::npos || o.size() < 2 || o.compare(o.size() - 2, 2, "_O") != 0) continue;
+            int n = atoi(o.c_str() + pos + 8);
+            std::string site = "BUFGCTRL_X0Y" + std::to_string(n + (o.find("CLK_BUFG_TOP") != std::string::npos ? 16 : 0));
+            std::string in;
+            for (const char *p : {"_I0", "_I1"}) {
+                std::string w = o.substr(0, o.size() - 2) + p;
+                if (clk_src_of_root.count(dsu.find(w))) { in = w; break; }
+            }
+            if (in.empty()) continue;
+            std::string x = dsu.find(in);
+            bool fab = false;
+            for (int hops = 0; hops < 400; hops++) {
+                if (x.rfind("INT_", 0) == 0 || x.find("_IMUX") != std::string::npos) fab = true;
+                auto nx = clk_src_of_root.find(x);
+                if (nx == clk_src_of_root.end() || nx->second == x) break;
+                x = nx->second;
+            }
+            bufg_in[site] = x;
+            bufg_fabric[site] = fab;
+        }
+        std::map<std::string, std::string> best;        // terminal root -> most telling member wire
+        std::set<std::string> want;
+        for (const auto &kv : bufg_in) want.insert(kv.second);
+        auto rank = [](const std::string &w) {
+            if (w.find("MMCM_CLK") != std::string::npos || w.find("PLL_CLK") != std::string::npos || w.find("OUTCLK") != std::string::npos) return 3;
+            if (w.find("CLBL") != std::string::npos) return 2;
+            return 1;
+        };
+        std::vector<std::string> keys;
+        for (const auto &kv : dsu.parent) keys.push_back(kv.first);
+        for (const auto &k : keys) {
+            const std::string &r = dsu.find(k);
+            if (!want.count(r)) continue;
+            auto b = best.find(r);
+            if (b == best.end() || rank(k) > rank(b->second)) best[r] = k;
+        }
+        for (const auto &kv : bufg_in) {
+            std::string w = best.count(kv.second) ? best[kv.second] : kv.second;
+            auto sl = w.find('/');
+            auto d = std::make_pair(w.substr(0, sl), sl == std::string::npos ? std::string() : w.substr(sl + 1));
+            std::string pin;
+            size_t m = d.second.find("MMCM_");
+            if (m != std::string::npos) pin = d.second.substr(m + 5);
+            else if (d.second.find("PLL_") != std::string::npos) pin = d.second.substr(d.second.find("PLL_") + 4);
+            else if (d.second.find("RXOUTCLK") != std::string::npos) pin = "RXOUTCLK";
+            else if (d.second.find("TXOUTCLK") != std::string::npos) pin = "TXOUTCLK";
+            os << "// lvs-bufg-src " << kv.first << " " << d.first << " " << (pin.empty() ? "-" : pin) << " " << (bufg_fabric[kv.first] ? "fabric" : "dedicated") << "\n";
+        }
+    }
     os << "\n" << body.str() << "endmodule\n";
 
     if (simple_clock && one_clock)

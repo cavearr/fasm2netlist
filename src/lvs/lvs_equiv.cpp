@@ -112,6 +112,7 @@ static int run(int argc, char **argv)
     std::map<std::string, std::string> gate_to_gold;
     std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
     std::map<std::string, std::string> bufg_site;  // gold BUFG cell -> its BUFGCTRL site
+    std::map<std::string, std::string> bufg_src;   // BUFGCTRL site -> "<tile> <pin>" of its input in the synthesis
     std::map<std::string, lvs::RegMap::HardBlock> hard_blocks;
     std::map<std::string, std::vector<std::string>> gate_alts;  // other names for the same net
 
@@ -129,6 +130,7 @@ static int run(int argc, char **argv)
         for (const auto &kv : rm.alt) gate_alts[sanitise(kv.first)] = kv.second;
         mem_cuts = rm.mem;
         bufg_site = rm.bufg_site;
+        bufg_src = rm.bufg_src;
         hard_blocks = rm.hard;
         if (!mem_cuts.empty())
             std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
@@ -425,6 +427,45 @@ static int run(int argc, char **argv)
         }
         std::cout << "register clock source: " << src_rows << " compared, " << src_diff << " differ (" << untraced
                   << " not traced in the extraction, " << no_bufg << " not driven by a BUFG in the synthesis)\n";
+    }
+    // What feeds each BUFG.  The extraction (with --routed-clock) writes "// lvs-bufg-src <site> <tile> <pin>" after tracing every BUFGCTRL input
+    // back through the clock tree to an MMCM/PLL output, a transceiver clock or a slice; the synthesis side is the cell driving the BUFG's input,
+    // placed.  A buffer in the synthesis that the extraction did not trace, or one the extraction has that the synthesis lacks, is a difference.
+    {
+        std::map<std::string, std::string> gate_src;
+        std::vector<std::pair<std::string, std::string>> pad_fabric;   // BUFGs fed from a pad through general routing
+        std::ifstream gf(gate_path);
+        for (std::string line; std::getline(gf, line);) {
+            if (line.rfind("// lvs-bufg-src ", 0) != 0) continue;
+            std::istringstream is(line.substr(16));
+            std::string site, tile, pin, route;
+            is >> site >> tile >> pin >> route;
+            gate_src[site] = tile + " " + pin;
+            if (route == "fabric" && (tile.rfind("LIOB", 0) == 0 || tile.rfind("RIOB", 0) == 0)) pad_fabric.emplace_back(site, tile);
+        }
+        if (!gate_src.empty() && !bufg_src.empty()) {
+            int rows = 0, bdiff = 0;
+            for (const auto &[site, want] : bufg_src) {
+                rows++;
+                auto it = gate_src.find(site);
+                if (it != gate_src.end() && it->second == want) continue;
+                bdiff++;
+                differ++;
+                std::cout << "  DIFFER  " << site << " input: gold " << want << ", gate " << (it == gate_src.end() ? "not traced" : it->second) << "\n";
+            }
+            for (const auto &[site, got] : gate_src)
+                if (!bufg_src.count(site)) {
+                    bdiff++;
+                    differ++;
+                    std::cout << "  DIFFER  " << site << " input: gate " << got << ", no such buffer in the synthesis\n";
+                }
+            std::cout << "BUFG input source: " << rows << " compared, " << bdiff << " differ\n";
+            // Not a difference -- the synthesis cannot say which route is taken -- but a clock pad reaching a BUFG through the fabric is the
+            // case Vivado's PLCK-23 rejects: the dedicated clock path from a clock-capable pad is not used.
+            for (const auto &[site, tile] : pad_fabric)
+                std::cout << "  NOTE    " << site << " input comes from the pad at " << tile
+                          << " through general routing, not the dedicated clock path\n";
+        }
     }
     auto gate_outs = gate.output_bits();
     for (const auto &[port, bit] : gold.output_bits()) {
