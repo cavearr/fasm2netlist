@@ -597,6 +597,9 @@ static int run(int argc, char **argv)
                     patdet_unseen++;
                     continue;
                 }
+                // ADREG and DREG are the pre-adder's registers.  Without USE_DPORT the pre-adder is not used, and Vivado then writes
+                // both registers off (ZADREG, ZDREG) whatever the attributes say; so does nextpnr.  Not a claim the synthesis makes.
+                if (G.dsp && (r == "ADREG" || r == "DREG") && value_of(G.contents, "USE_DPORT") != "true") continue;
                 std::string gv = value_of(G.contents, r);
                 std::string tv = value_of(t.contents, r);
                 // A row the synthesis left undefined -- yosys writes the
