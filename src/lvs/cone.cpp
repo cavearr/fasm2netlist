@@ -642,8 +642,9 @@ void Cones::collect_mem_ports()
                     // extraction can see, and not a net either side can name.  What decides the cascade is RAM_EXTENSION and address
                     // bit 15, which are compared.
                     // WEBWE[7:4] are the upper byte enables of the 72-bit simple-dual-port write; in TDP mode, at any width up to 36, they are
-                    // not looked at, and nextpnr does not route them (the synthesis ties all eight to one net).
-                    const bool webwe_upper_unused = is36 && p.first == "WEBWE" && b >= 4 &&
+                    // not looked at, and nextpnr does not route them (the synthesis ties all eight to one net).  The same holds for an 18Kb
+                    // block's WEBWE[3:2] in TDP: they exist for the 36-bit SDP write, and Vivado leaves them unconnected otherwise.
+                    const bool webwe_upper_unused = p.first == "WEBWE" && b >= (is36 ? 4 : 2) &&
                                                     param_str(inst, "RAM_MODE", "TDP") != "SDP";
                     g.dontcare.push_back(webwe_upper_unused || !pp || bit_is_dontcare(pp->conn, sb) ||
                                          write_data_unused(p.first) || parity_unused || p.first.rfind("CASCADEIN", 0) == 0 ||
