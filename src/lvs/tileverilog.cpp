@@ -2561,7 +2561,9 @@ endmodule
         std::set<std::string> want;
         for (const auto &kv : bufg_in) want.insert(kv.second);
         auto rank = [](const std::string &w) {
-            if (w.find("MMCM_CLK") != std::string::npos || w.find("PLL_CLK") != std::string::npos || w.find("OUTCLK") != std::string::npos) return 3;
+            if (w.find("MMCM_CLK") != std::string::npos || w.find("PLL_CLK") != std::string::npos || w.find("PLLE2_CLK") != std::string::npos ||
+                w.find("OUTCLK") != std::string::npos)
+                return 3;
             if (w.find("CLBL") != std::string::npos) return 2;
             return 1;
         };
@@ -2580,6 +2582,8 @@ endmodule
             std::string pin;
             size_t m = d.second.find("MMCM_");
             if (m != std::string::npos) pin = d.second.substr(m + 5);
+            // A PLL's outputs are named <tile type>_PLLE2_CLKOUT<n> in the database, an MMCM's <tile type>_MMCM_CLKOUT<n>.
+            else if (d.second.find("PLLE2_") != std::string::npos) pin = d.second.substr(d.second.find("PLLE2_") + 6);
             else if (d.second.find("PLL_") != std::string::npos) pin = d.second.substr(d.second.find("PLL_") + 4);
             else if (d.second.find("RXOUTCLK") != std::string::npos) pin = "RXOUTCLK";
             else if (d.second.find("TXOUTCLK") != std::string::npos) pin = "TXOUTCLK";
