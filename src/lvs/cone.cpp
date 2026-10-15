@@ -791,11 +791,10 @@ void Cones::collect_mem_ports()
                 {
                     MemPort::Group g =
                         group("write data", bits_of(inst, std::string("DI") + port, width));
+                    // Bit by bit: yosys writes a port it half uses as {1'bx, net}, and the x bit is as free as an unconnected one.
                     const Pin *dp = inst.find_pin(std::string("DI") + port);
-                    bool dc = !dp || (dp->conn.kind == Expr::Kind::Const &&
-                                      dp->conn.const_text.find('x') != std::string::npos) ||
-                              dp->conn.kind == Expr::Kind::Unconnected;
-                    g.dontcare.assign(width, dc);
+                    g.dontcare.clear();
+                    for (int d = 0; d < width; d++) g.dontcare.push_back(!dp || bit_is_dontcare(dp->conn, d));
                     mp.boundary.push_back(std::move(g));
                 }
                 mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
