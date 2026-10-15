@@ -47,6 +47,12 @@ struct RegMap {
         std::string gate_name_alt;
     };
     std::map<std::string, HardBlock> hard;   // gold cell name -> where it went
+    // Every BUFG-family cell of the synthesis and the BUFGCTRL site the placement put it in (BUFGCTRL_X0Y16): what a register's clock is
+    // compared by, since the extraction names the buffer that drives a clock by its site.
+    std::map<std::string, std::string> bufg_site;
+    // BUFGCTRL site -> "<tile> <pin>" of what the synthesis connects its input to: an MMCM/PLL output or a transceiver's TXOUTCLK/RXOUTCLK
+    // with the tile the placement put it in, or "<tile> -" for any other driver (a slice).  Compared against the extraction's traced input.
+    std::map<std::string, std::string> bufg_src;
 
     std::string module;         // the gold module the labels came from
     int mapped = 0, skipped = 0;

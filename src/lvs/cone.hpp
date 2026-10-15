@@ -53,9 +53,13 @@ class Cones
         // RAMs with the same boundary and different contents are not the same
         // memory, and nothing else in this checker would notice.
         std::map<std::string, std::string> contents;
+        bool dsp = false;     // a DSP48E1 (else a block RAM): which defaults apply to a parameter the synthesis leaves out
     };
     // Every memory port in this module, in a stable order.  Built on demand:
     // it evaluates cones, so it cannot run before construction finishes.
+    // Say that this is the synthesis side.  A few rules about hardware the bitstream spells out and the synthesis leaves implicit
+    // (a data pin duplicated at width 1) relax only that side, so a pin the extraction fails to wire still shows.  Call before mem_ports().
+    void mark_synthesis_side() { synthesis_side_ = true; }
     const std::vector<MemPort> &mem_ports()
     {
         if (!mem_ports_built_) { mem_ports_built_ = true; collect_mem_ports(); }
@@ -98,6 +102,12 @@ class Cones
     // that broke any is a run in which some cone lost a dependency, so
     // a proof from it is conditional on those loops being unreachable.
     int loops_broken() const { return loops_seen_; }
+    // The edge a register captures on: 1 for the falling edge.  A synthesis register says so with its type (FDRE_1 and the other _1 variants)
+    // or IS_C_INVERTED; an extracted one with its slice's CLKINV bit.  -1 if `state` is not a register here.
+    int clock_inverted(const std::string &state) const;
+    // The BUFG that clocks a register: for a synthesis register the name of the BUFG cell on its C net, for an extracted one the BUFGCTRL site
+    // its slice's clock was traced to (CLK_SRC).  Empty when not known (not traced, or not driven by a BUFG).
+    std::string clock_source(const std::string &state) const;
     std::vector<std::pair<std::string, int>> output_bits() const;
 
   private:
@@ -137,6 +147,7 @@ class Cones
     std::map<std::string, char> mem_port_;   // gold RAMs only: which port holds it
     std::vector<MemPort> mem_ports_;
     bool mem_ports_built_ = false;
+    bool synthesis_side_ = false;                 // the synthesis, not the extraction (see mark_synthesis_side)
     void collect_mem_ports();
     // The symbol a memory's data bit reads.  Paired memories are given the
     // same one, which is the whole of how a cut point works: downstream cones

@@ -14,6 +14,10 @@
 #include <unistd.h>
 #include <vector>
 
+#ifdef LVS_HAVE_CADICAL
+#include <cadical.hpp>
+#endif
+
 #ifdef LVS_HAVE_Z3
 #include <z3++.h>
 #include <algorithm>
@@ -128,6 +132,82 @@ class CommandSession : public Session
 
 } // namespace
 
+#ifdef LVS_HAVE_CADICAL
+
+namespace {
+
+// The linked CaDiCaL session.  Node n is variable n+1 (variable 1 is the constant, held false); an AND node gets its three Tseitin clauses
+// when a question first reaches it, and a question is one assumption.  Definitions are true whatever is asked, so clauses added for an
+// earlier cone are reused and what the solver learned stays valid.
+class CadicalSession : public Session
+{
+  public:
+    explicit CadicalSession(const BoolNet &net) : net_(net)
+    {
+        solver_.add(-1);   // variable 1 is node 0, the constant: false
+        solver_.add(0);
+        done_.push_back(true);
+    }
+
+    Result check(Lit lit) override
+    {
+        encode_cone(node_of(lit));
+        solver_.assume(sat_lit(lit));
+        switch (solver_.solve()) {
+        case 10: return Result::Sat;
+        case 20: return Result::Unsat;
+        default: return Result::Unknown;
+        }
+    }
+
+    std::string describe() const override { return std::string("libcadical ") + CaDiCaL::Solver::version() + " (linked, incremental)"; }
+
+  private:
+    static int sat_lit(Lit l) { return is_inverted(l) ? -int(node_of(l) + 1) : int(node_of(l) + 1); }
+
+    void encode_cone(uint32_t root)
+    {
+        const auto &ands = net_.ands();
+        if (done_.size() < net_.node_count()) done_.resize(net_.node_count(), false);
+        std::vector<uint32_t> stack{root};
+        while (!stack.empty()) {
+            uint32_t n = stack.back();
+            if (done_[n]) { stack.pop_back(); continue; }
+            auto it = ands.find(n);
+            if (it == ands.end()) {            // an input: a free variable, no clauses
+                done_[n] = true;
+                stack.pop_back();
+                continue;
+            }
+            uint32_t a = node_of(it->second.a), b = node_of(it->second.b);
+            bool ready = true;
+            if (!done_[a]) { stack.push_back(a); ready = false; }
+            if (!done_[b]) { stack.push_back(b); ready = false; }
+            if (!ready) continue;
+            const int v = int(n + 1), x = sat_lit(it->second.a), y = sat_lit(it->second.b);
+            solver_.add(-v); solver_.add(x); solver_.add(0);
+            solver_.add(-v); solver_.add(y); solver_.add(0);
+            solver_.add(v); solver_.add(-x); solver_.add(-y); solver_.add(0);
+            done_[n] = true;
+            stack.pop_back();
+        }
+    }
+
+    const BoolNet &net_;
+    CaDiCaL::Solver solver_;
+    std::vector<bool> done_;
+};
+
+} // namespace
+
+bool have_linked_cadical() { return true; }
+
+#else
+
+bool have_linked_cadical() { return false; }
+
+#endif
+
 #ifdef LVS_HAVE_Z3
 
 namespace {
@@ -143,11 +223,12 @@ class Z3Session : public Session
     {
         // node 0 is the constant, and literal 0 is FALSE
         expr_.push_back(ctx_.bool_val(false));
+        done_.push_back(true);
     }
 
     Result check(Lit lit) override
     {
-        encode_new_nodes();
+        encode_cone(node_of(lit));
         z3::expr_vector assumption(ctx_);
         assumption.push_back(lit_expr(lit));
         switch (solver_.check(assumption)) {
@@ -172,17 +253,37 @@ class Z3Session : public Session
         return is_inverted(l) ? !e : e;
     }
 
-    // Nodes the network has grown since the last question.  An AND node gets
-    // its definition; anything else at that index is a free variable (an
-    // input), which needs a constant and no constraint.
-    void encode_new_nodes()
+    // Only the nodes the question can reach.  A miter's cone is a small part of a SoC-sized network, and asserting a definition for every
+    // node the network has ever grown (which is what this used to do) made the first question pay for all of them and every later one for the
+    // growth in between.  A definition is true whatever is asked, so one encoded for an earlier cone is simply reused.  Iterative: a cone
+    // can be deeper than the stack.
+    void encode_cone(uint32_t root)
     {
         const auto &ands = net_.ands();
-        for (uint32_t n = uint32_t(expr_.size()); n < net_.node_count(); n++) {
-            expr_.push_back(ctx_.bool_const(("n" + std::to_string(n)).c_str()));
+        if (expr_.size() < net_.node_count()) {
+            expr_.resize(net_.node_count(), ctx_.bool_val(false));
+            done_.resize(net_.node_count(), false);
+        }
+        std::vector<uint32_t> stack{root};
+        while (!stack.empty()) {
+            uint32_t n = stack.back();
+            if (n == 0 || done_[n]) { stack.pop_back(); continue; }
             auto it = ands.find(n);
-            if (it != ands.end())
-                solver_.add(expr_[n] == (lit_expr(it->second.a) && lit_expr(it->second.b)));
+            if (it == ands.end()) {            // an input: a free variable
+                expr_[n] = ctx_.bool_const(("n" + std::to_string(n)).c_str());
+                done_[n] = true;
+                stack.pop_back();
+                continue;
+            }
+            uint32_t a = node_of(it->second.a), b = node_of(it->second.b);
+            bool ready = true;
+            if (a && !done_[a]) { stack.push_back(a); ready = false; }
+            if (b && !done_[b]) { stack.push_back(b); ready = false; }
+            if (!ready) continue;
+            expr_[n] = ctx_.bool_const(("n" + std::to_string(n)).c_str());
+            solver_.add(expr_[n] == (lit_expr(it->second.a) && lit_expr(it->second.b)));
+            done_[n] = true;
+            stack.pop_back();
         }
     }
 
@@ -190,6 +291,7 @@ class Z3Session : public Session
     z3::context ctx_;
     z3::solver solver_;
     std::vector<z3::expr> expr_;   // node index -> its Bool constant
+    std::vector<bool> done_;       // ...once its definition has been asserted
 };
 
 } // namespace
@@ -198,6 +300,10 @@ bool have_linked_z3() { return true; }
 
 std::unique_ptr<Session> make_session(const BoolNet &net, const Solver &solver)
 {
+#ifdef LVS_HAVE_CADICAL
+    if (solver.command == linked_cadical_name())
+        return std::make_unique<CadicalSession>(net);
+#endif
     if (solver.command == linked_z3_name())
         return std::make_unique<Z3Session>(net);
     return std::make_unique<CommandSession>(net, solver);
@@ -209,6 +315,10 @@ bool have_linked_z3() { return false; }
 
 std::unique_ptr<Session> make_session(const BoolNet &net, const Solver &solver)
 {
+#ifdef LVS_HAVE_CADICAL
+    if (solver.command == linked_cadical_name())
+        return std::make_unique<CadicalSession>(net);
+#endif
     Solver s = solver;
     if (s.command == linked_z3_name())
         s.command = "z3";   // built without the library; the command still works

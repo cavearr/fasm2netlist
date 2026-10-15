@@ -32,11 +32,12 @@ namespace {
 void usage()
 {
     std::cerr << "usage: lvs_equiv --gold <a.v> --gate <b.v> [--top NAME]\n"
-                 "                 [--solver libz3|'cmd'] [--format dimacs|smt2]\n"
+                 "                 [--solver libcadical|libz3|'cmd'] [--format dimacs|smt2]\n"
                  "                 [--dump-prefix PATH] [--quiet] [--explain] [--only TEXT]\n"
                  "\n"
-                 "  --solver libz3  the linked library, one incremental session"
-              << (have_linked_z3() ? " (default)\n" : " -- NOT IN THIS BUILD\n")
+                 "  --solver libcadical  the linked CaDiCaL (default when built with it)\n"
+              "  --solver libz3  the linked library, one incremental session"
+              << (have_linked_z3() ? (have_linked_cadical() ? "\n" : " (default)\n") : " -- NOT IN THIS BUILD\n")
               << "  --solver <cmd>  any binary reading the chosen format, run per question\n";
 }
 
@@ -57,7 +58,7 @@ static int run(int argc, char **argv)
     std::string gold_path, gate_path, top = "top", gold_top, gate_top, dump_prefix, map_path;
     std::vector<std::pair<std::string, std::string>> compare;   // arbitrary net pairs
     std::string placement_p, gold_json_p, db, device;
-    Solver solver{have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
+    Solver solver{have_linked_cadical() ? linked_cadical_name() : have_linked_z3() ? linked_z3_name() : "z3", Format::SmtLib2};
     bool quiet = false;
     // --explain: after a failure, say which named variables each side reads.
     bool explain = false;
@@ -110,6 +111,8 @@ static int run(int argc, char **argv)
     // netlists share no names at all and every register "differs".
     std::map<std::string, std::string> gate_to_gold;
     std::map<std::string, std::string> mem_cuts;   // gate read symbol -> gold's
+    std::map<std::string, std::string> bufg_site;  // gold BUFG cell -> its BUFGCTRL site
+    std::map<std::string, std::string> bufg_src;   // BUFGCTRL site -> "<tile> <pin>" of its input in the synthesis
     std::map<std::string, lvs::RegMap::HardBlock> hard_blocks;
     std::map<std::string, std::vector<std::string>> gate_alts;  // other names for the same net
 
@@ -126,6 +129,8 @@ static int run(int argc, char **argv)
         for (const auto &kv : rm.net) gate_to_gold[sanitise(kv.first)] = kv.second;
         for (const auto &kv : rm.alt) gate_alts[sanitise(kv.first)] = kv.second;
         mem_cuts = rm.mem;
+        bufg_site = rm.bufg_site;
+        bufg_src = rm.bufg_src;
         hard_blocks = rm.hard;
         if (!mem_cuts.empty())
             std::cout << "memory map: " << mem_cuts.size() << " read symbols from the placement\n";
@@ -148,6 +153,7 @@ static int run(int argc, char **argv)
 
     BoolNet net;
     Cones gold(*gold_m, net);
+    gold.mark_synthesis_side();
 
     // The map's gold-side label need not be the name gold's own netlist uses:
     // a net can answer to several names (yosys writes the top-level `led_int`,
@@ -258,6 +264,8 @@ static int run(int argc, char **argv)
     std::cout << "solver: " << session->describe() << "\n\n";
 
     int proved = 0, differ = 0, unknown = 0;
+    double solver_secs = 0;
+    int trivial = 0, asked = 0;
     auto t0 = std::chrono::steady_clock::now();
 
     // Which named variables a cone actually reads.  A miter that fails says
@@ -297,7 +305,15 @@ static int run(int argc, char **argv)
             std::ofstream(dump_prefix + safe + (solver.format == Format::Dimacs ? ".cnf" : ".smt2"))
                 << emit(net, miter, solver.format);
         }
-        Result r = session->check(miter);
+        auto ts = std::chrono::steady_clock::now();
+        // A miter that structural hashing has already folded to the constant 0 is proved (and to the constant 1, refuted): no solver is
+        // needed, and on a design whose two sides came from the same netlist that is nearly every question.
+        Result r = miter == 0 ? Result::Unsat : session->check(miter);
+        solver_secs += std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count();
+        if (miter == 0) trivial++;
+        else if (getenv("LVS_PROFILE"))
+            std::cerr << "  [solve " << std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count() << "s] " << label << "\n";
+        asked++;
         if (r == Result::Unsat) { proved++; if (!quiet) std::cout << "  proved  " << label << "\n"; }
         else if (r == Result::Sat) {
             differ++;
@@ -360,6 +376,97 @@ static int run(int argc, char **argv)
         if (!only.empty() && g.find(only) == std::string::npos) continue;
         check(g == t ? g : (g + " = " + t), gold.next_state(g), gate.next_state(t));
     }
+    // Clock polarity of every matched register: configuration, like a RAM's width.  The proof itself has no edges, so the edge a register
+    // captures on is held against the bitstream here.  (Which clock net drives it is a separate question -- clocks are assumed common.)
+    {
+        int pol_rows = 0, pol_diff = 0;
+        for (const auto &[g, t] : common) {
+            int gp = gold.clock_inverted(g), tp = gate.clock_inverted(t);
+            if (gp < 0 || tp < 0) continue;
+            pol_rows++;
+            if (gp == tp) continue;
+            pol_diff++;
+            differ++;
+            if (pol_diff <= 40)
+                std::cout << "  DIFFER  " << (g == t ? g : g + " = " + t) << " clock edge: gold "
+                          << (gp ? "falling" : "rising") << ", gate " << (tp ? "falling" : "rising") << "\n";
+        }
+        std::cout << "register clock edge: " << pol_rows << " compared, " << pol_diff << " differ\n";
+    }
+    // Which BUFG clocks each matched register.  The extraction traces it only under --routed-clock; without that every register reads as not
+    // traced and the row is skipped.  A synthesis register driven by something other than a BUFG (a clock straight from a pad or a BUFR) has no
+    // BUFG to compare, so it is counted but not held against the extraction.
+    {
+        int src_rows = 0, src_diff = 0, untraced = 0, no_bufg = 0;
+        std::vector<std::pair<std::string, std::string>> untraced_regs;   // registers whose clock the extraction could not trace
+        for (const auto &[g, t] : common) {
+            if (gold.clock_inverted(g) < 0 || gate.clock_inverted(t) < 0) continue;
+            std::string gc = gold.clock_source(g), tc = gate.clock_source(t);
+            if (gc.empty()) { no_bufg++; continue; }
+            if (tc.empty()) { untraced++; untraced_regs.emplace_back(g, t); continue; }
+            auto site = bufg_site.find(gc);
+            std::string gs = site == bufg_site.end() ? gc : site->second;
+            src_rows++;
+            if (gs == tc) continue;
+            src_diff++;
+            differ++;
+            if (src_diff <= 40)
+                std::cout << "  DIFFER  " << (g == t ? g : g + " = " + t) << " clock source: gold " << gc << " (" << gs << "), gate " << tc << "\n";
+        }
+        // With the clock tree traced for most registers, one it could not trace is not "unknown": its clock pin reaches no BUFG, which is either
+        // a missing pip or a clock the design does not have.  Without --routed-clock nothing is traced and the row is not applicable.
+        if (src_rows > 0 && !untraced_regs.empty()) {
+            for (size_t i = 0; i < untraced_regs.size(); i++) {
+                differ++;
+                src_diff++;
+                if (i < 40)
+                    std::cout << "  DIFFER  " << untraced_regs[i].first << " = " << untraced_regs[i].second
+                              << " clock source: gold has a BUFG, the extraction's clock reaches none\n";
+            }
+            untraced = 0;
+        }
+        std::cout << "register clock source: " << src_rows << " compared, " << src_diff << " differ (" << untraced
+                  << " not traced in the extraction, " << no_bufg << " not driven by a BUFG in the synthesis)\n";
+    }
+    // What feeds each BUFG.  The extraction (with --routed-clock) writes "// lvs-bufg-src <site> <tile> <pin>" after tracing every BUFGCTRL input
+    // back through the clock tree to an MMCM/PLL output, a transceiver clock or a slice; the synthesis side is the cell driving the BUFG's input,
+    // placed.  A buffer in the synthesis that the extraction did not trace, or one the extraction has that the synthesis lacks, is a difference.
+    {
+        std::map<std::string, std::string> gate_src;
+        std::vector<std::pair<std::string, std::string>> pad_fabric;   // BUFGs fed from a pad through general routing
+        std::ifstream gf(gate_path);
+        for (std::string line; std::getline(gf, line);) {
+            if (line.rfind("// lvs-bufg-src ", 0) != 0) continue;
+            std::istringstream is(line.substr(16));
+            std::string site, tile, pin, route;
+            is >> site >> tile >> pin >> route;
+            gate_src[site] = tile + " " + pin;
+            if (route == "fabric" && (tile.rfind("LIOB", 0) == 0 || tile.rfind("RIOB", 0) == 0)) pad_fabric.emplace_back(site, tile);
+        }
+        if (!gate_src.empty() && !bufg_src.empty()) {
+            int rows = 0, bdiff = 0;
+            for (const auto &[site, want] : bufg_src) {
+                rows++;
+                auto it = gate_src.find(site);
+                if (it != gate_src.end() && it->second == want) continue;
+                bdiff++;
+                differ++;
+                std::cout << "  DIFFER  " << site << " input: gold " << want << ", gate " << (it == gate_src.end() ? "not traced" : it->second) << "\n";
+            }
+            for (const auto &[site, got] : gate_src)
+                if (!bufg_src.count(site)) {
+                    bdiff++;
+                    differ++;
+                    std::cout << "  DIFFER  " << site << " input: gate " << got << ", no such buffer in the synthesis\n";
+                }
+            std::cout << "BUFG input source: " << rows << " compared, " << bdiff << " differ\n";
+            // Not a difference -- the synthesis cannot say which route is taken -- but a clock pad reaching a BUFG through the fabric is the
+            // case Vivado's PLCK-23 rejects: the dedicated clock path from a clock-capable pad is not used.
+            for (const auto &[site, tile] : pad_fabric)
+                std::cout << "  NOTE    " << site << " input comes from the pad at " << tile
+                          << " through general routing, not the dedicated clock path\n";
+        }
+    }
     auto gate_outs = gate.output_bits();
     for (const auto &[port, bit] : gold.output_bits()) {
         // The two sides need not agree on bus-ness: gold declares an 8-bit
@@ -382,9 +489,16 @@ static int run(int argc, char **argv)
     // boundary: read address, write address, write data, write enable.  Prove
     // those equal and the contents are equal by construction -- which is both
     // why the cut is sound and what checks the pairing that made it.
-    if (!mem_cuts.empty()) {
+    // Run whenever either side has a cut primitive: a design with DSPs and no block RAM has an empty memory map and used to skip all of this,
+    // so its DSPs' boundary and configuration were never looked at.
+    if (!mem_cuts.empty() || !gold.mem_ports().empty() || !gate.mem_ports().empty()) {
         const auto &gp = gold.mem_ports();
         const auto &tp = gate.mem_ports();
+        // A DSP has no read symbols to pair by.  The placement says which extracted instance each synthesis DSP became (the same map the
+        // hard-block check below uses), so pair through that.
+        std::map<std::string, const Cones::MemPort *> gold_by_where;
+        for (const auto &m : gp)
+            if (m.dsp) gold_by_where[m.where] = &m;
         // Pair by the symbol a memory's first read produces: the placement
         // already renamed the gate's to the gold's, so equal symbols are the
         // paired memories, whatever either side calls anything else.
@@ -392,14 +506,29 @@ static int run(int argc, char **argv)
         for (const auto &m : gp)
             if (!m.out_sym.empty()) by_sym[m.out_sym.front()] = &m;
         int mem_pairs = 0, mem_unpaired = 0, mem_rows = 0, mem_content_diff = 0;
+        int dsp_paired = 0, patdet_set = 0;      // for the one parameter the bitstream has no bit for (below)
+        std::set<const Cones::MemPort *> paired_gold;
         for (const auto &t : tp) {
-            if (t.out_sym.empty()) continue;
-            auto want = mem_cuts.find(t.out_sym.front());
-            if (want == mem_cuts.end()) continue;
-            auto g = by_sym.find(want->second);
-            if (g == by_sym.end()) continue;
+            const Cones::MemPort *gptr = nullptr;
+            if (t.dsp) {
+                for (const auto &[cell, hb] : hard_blocks) {
+                    if (hb.gate_name != t.where && (hb.gate_name_alt.empty() || hb.gate_name_alt != t.where)) continue;
+                    auto it = gold_by_where.find(cell);
+                    if (it != gold_by_where.end()) gptr = it->second;
+                    break;
+                }
+            } else {
+                if (t.out_sym.empty()) continue;
+                auto want = mem_cuts.find(t.out_sym.front());
+                if (want == mem_cuts.end()) continue;
+                auto g = by_sym.find(want->second);
+                if (g == by_sym.end()) continue;
+                gptr = g->second;
+            }
+            if (!gptr) continue;
+            paired_gold.insert(gptr);
             mem_pairs++;
-            const Cones::MemPort &G = *g->second;
+            const Cones::MemPort &G = *gptr;
             // The two sides list their boundary groups independently, so they
             // are paired by name.  A group only one side has is not silently
             // dropped: it is counted, because a boundary that is checked in
@@ -429,31 +558,86 @@ static int run(int argc, char **argv)
             // memory's widths and write modes, a DSP's inversion masks and
             // register enables.  Compared directly, because a boundary that
             // agrees says nothing about what the primitive does with it.
+            // A parameter a side leaves out means the primitive's default, which is not always zero (a DSP's AREG is 1), so each side's value
+            // for a row is what it says or else the default.  Canonical spelling, as in cone.cpp's cut_config.
+            static const std::map<std::string, std::string> kDspDefault = {
+                {"A_INPUT", "direct"}, {"B_INPUT", "direct"}, {"AREG", "1"}, {"ACASCREG", "1"}, {"BREG", "1"}, {"BCASCREG", "1"},
+                {"ADREG", "1"}, {"ALUMODEREG", "1"}, {"CARRYINREG", "1"}, {"CARRYINSELREG", "1"}, {"CREG", "1"}, {"DREG", "1"},
+                {"INMODEREG", "1"}, {"MREG", "1"}, {"OPMODEREG", "1"}, {"PREG", "1"}, {"USE_DPORT", "false"}, {"USE_MULT", "multiply"},
+                {"USE_SIMD", "one48"}, {"AUTORESET_PATDET", "noreset"}, {"SEL_MASK", "mask"}, {"SEL_PATTERN", "pattern"},
+                {"USE_PATTERN_DETECT", "nopatdet"}, {"MASK", "3fffffffffff"}};
+            static const std::map<std::string, std::string> kRamDefault = {
+                {"RAM_MODE", "tdp"}, {"WRITE_MODE_A", "writefirst"}, {"WRITE_MODE_B", "writefirst"},
+                {"RAM_EXTENSION_A", "none"}, {"RAM_EXTENSION_B", "none"}};
+            const auto &dflt = G.dsp ? kDspDefault : kRamDefault;
+            auto value_of = [&](const std::map<std::string, std::string> &m, const std::string &row) {
+                auto it = m.find(row);
+                if (it != m.end()) return it->second;
+                auto d = dflt.find(row);
+                return d == dflt.end() ? std::string("0") : d->second;
+            };
+            if (G.dsp) {
+                dsp_paired++;
+                if (value_of(G.contents, "USE_PATTERN_DETECT") != "nopatdet") patdet_set++;
+            }
             std::set<std::string> rows;
             for (const auto &kv : G.contents) rows.insert(kv.first);
             for (const auto &kv : t.contents) rows.insert(kv.first);
             for (const auto &r : rows) {
-                auto gi = G.contents.find(r), ti = t.contents.find(r);
-                std::string gv = gi == G.contents.end() ? "0" : gi->second;
-                std::string tv = ti == t.contents.end() ? "0" : ti->second;
+                // Not observable: a DSP's USE_PATTERN_DETECT has no bit in the bitstream (PATDET and NO_PATDET give identical bits; database
+                // FIXES.md), so there is nothing on the extraction side to hold the synthesis against.  Counted and reported below, not skipped
+                // quietly.
+                if (G.dsp && r == "USE_PATTERN_DETECT") continue;
+                std::string gv = value_of(G.contents, r);
+                std::string tv = value_of(t.contents, r);
                 // A row the synthesis left undefined -- yosys writes the
                 // unused parity rows as x -- says nothing about what the
                 // memory should hold, exactly as a don't-care pin does at the
                 // boundary.  The fabric always has some value there.
                 if (gv.find('x') != std::string::npos) continue;
+                // A port the synthesis does not have (width 0) has no width to compare: the bitstream still writes that port's
+                // width marker, at whatever the memory's width makes it, and that is not a claim about the design either.
+                if (gv == "0" && (r.rfind("READ_WIDTH_", 0) == 0 || r.rfind("WRITE_WIDTH_", 0) == 0)) continue;
+                // A clock's polarity is only meaningful for a port the synthesis uses; the tag of an unused port is whatever the placer left.
+                if (!G.dsp && (r == "IS_CLKARDCLK_INVERTED" || r == "IS_CLKBWRCLK_INVERTED")) {
+                    const char ab = r == "IS_CLKARDCLK_INVERTED" ? 'A' : 'B';
+                    if (value_of(G.contents, std::string("READ_WIDTH_") + ab) == "0" &&
+                        value_of(G.contents, std::string("WRITE_WIDTH_") + ab) == "0")
+                        continue;
+                }
                 mem_rows++;
                 if (gv == tv) continue;
                 mem_content_diff++;
-                if (mem_content_diff <= 20)
+                if (mem_content_diff <= 40)
                     std::cout << "  DIFFER  " << t.where << " " << r << ": gold " << gv
                               << ", gate " << tv << "\n";
             }
         }
         std::cout << "memories: " << gp.size() << " gold, " << tp.size() << " gate, "
                   << mem_pairs << " paired, " << mem_rows << " content rows compared\n";
+        {
+            // A cut primitive of the synthesis with no counterpart in the extraction was never compared -- not its boundary, not its
+            // configuration -- and passing it silently is how a DSP went unchecked for as long as this tool has existed.  It is unproved.
+            int unpaired = 0;
+            for (const auto &m : gp)
+                if (!paired_gold.count(&m)) unpaired++;
+            if (unpaired) {
+                std::cout << "  " << unpaired << " of " << gp.size()
+                          << " cut primitive(s) of the synthesis have no counterpart in the extraction, so their boundary and configuration were"
+                             " not compared (counted as unproved)\n";
+                unknown += unpaired;
+            }
+        }
+        if (dsp_paired)
+            std::cout << "not observable in the bitstream, so not compared: USE_PATTERN_DETECT (" << patdet_set << " of " << dsp_paired
+                      << " DSPs set it to PATDET)\n";
         if (mem_content_diff)
             std::cout << "cut primitives: " << mem_content_diff
-                      << " contents/configuration difference(s)\n";
+                      << " contents/configuration difference(s)"
+                      << (mem_content_diff > 40 ? " (the first 40 are listed)" : "") << "\n";
+        // They are differences, and are counted as such.  They used to be printed and not counted, so a RAM or DSP configured
+        // differently from its synthesis -- a width, a write mode, a cascade setting -- left the verdict at "0 differ".
+        differ += mem_content_diff;
         if (mem_unpaired)
             std::cout << "  " << mem_unpaired
                       << " boundary group(s) named on one side only, so not checked\n";
@@ -522,6 +706,7 @@ static int run(int argc, char **argv)
     auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "\n" << proved << " proved, " << differ << " differ, " << unknown << " unknown"
               << "   (" << secs << "s)\n";
+    std::cout << "solver time " << solver_secs << "s over " << asked << " questions (" << trivial << " already constant after structural hashing)\n";
     // A broken loop is not a detail of the run, it is a caveat on its verdict:
     // the constant it leaves behind deletes a dependency, so a cone can prove
     // -- or differ -- for want of an input rather than on the merits.  Say so

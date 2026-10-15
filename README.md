@@ -95,10 +95,16 @@ equivalence check cannot help.
 
 Three things are assumed rather than reconstructed, and each is deliberate:
 
-- **The clock tree.** With one BUFG in the design there is only one thing a
-  clock pin can be, so they are joined to it. `--routed-clock` turns that off.
-  Clock pins are therefore not obligations, for the same reason a flip-flop's
-  `C` is never compared.
+- **The clock tree** is *not* assumed by default: the clock-tree pips are kept,
+  each slice clock is followed to the BUFG that drives it, and each BUFG's input
+  is followed to its source (an MMCM/PLL output, a transceiver clock, a pad or a
+  slice).  The LVS holds register clock edge, register clock source and BUFG
+  input source against the synthesis.  A BUFG whose input reaches it through a
+  LUT and general routing instead of the MMCM output is a difference; a pad
+  clock routed through the fabric is a note.  Costs about 15% more extraction
+  time and memory.  `--simple-clock` restores the old simplification (one BUFG:
+  every clock pin joined to it, clock pins not obligations, and none of those
+  three rows run); `--routed-clock` is accepted and does nothing.
 - **The MMCM's configuration.** A frequency is not a Boolean fact. Its `LOCKED`
   pin *is*, and is cut like any other hard-block output -- which matters
   because a reset synchroniser waits on it.
@@ -308,3 +314,16 @@ present:
   confirmation at a time; (4) re-verify each seed for real once its own
   dependencies resolve. On the Johnson counter this matches all 36
   registers with zero placement input, agreeing with ground truth 36/36.
+
+## Solver
+
+`lvs_equiv` answers its equivalence questions with CaDiCaL, linked as a library (cone-only Tseitin encoding, incremental through
+assumptions).  The source is the `third_party/cadical` submodule, pinned at `rel-3.0.1`, and CMake builds it with its own
+`configure`/`make`:
+
+    git submodule update --init third_party/cadical
+    cmake -S . -B build && cmake --build build
+
+An installed copy is used instead if `-DCADICAL_ROOT=<prefix>` (with `include/cadical.hpp` and `lib/libcadical.a`) is given.  Without
+either, the linked Z3 (`--solver libz3`) or any command (`--solver 'kissat'` with `--format dimacs`) still works.  On `vc707-ocaml`
+(19250 questions) CaDiCaL takes 140 s where Z3 took 2968 s.

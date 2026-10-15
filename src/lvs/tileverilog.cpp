@@ -35,6 +35,7 @@
 
 #include "bram_ports.hpp"
 #include "dsp_ports.hpp"
+#include "gtpins.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -123,7 +124,7 @@ int main(int argc, char **argv)
     std::string placement_path, gold_json_path;
     std::vector<std::string> input_pats;   // substrings naming genuinely external nets
     int hops = 0;                          // rounds of reachability growth
-    bool simple_clock = true;              // see the note on the clock tree below
+    bool simple_clock = false;             // --simple-clock; see the note on the clock tree below
     bool use_default_ppips = false;        // `default` ppips: off until justified
     int pullup = 1;                        // value an undriven routing net reads
     // --timing: every routing assign carries the database's transport delay
@@ -144,7 +145,8 @@ int main(int argc, char **argv)
         else if (a == "--part") part = next();
         else if (a == "--input") input_pats.push_back(next());
         else if (a == "--hops") hops = atoi(next().c_str());
-        else if (a == "--routed-clock") simple_clock = false;
+        else if (a == "--routed-clock") simple_clock = false;   // the default; kept so existing command lines work
+        else if (a == "--simple-clock") simple_clock = true;
         else if (a == "--pullup") pullup = atoi(next().c_str());
         else if (a == "--default-ppips") use_default_ppips = true;
         else if (a == "--placement") placement_path = next();
@@ -256,12 +258,17 @@ int main(int argc, char **argv)
     std::map<std::string, std::map<std::string, PipT>> pip_timing;              // type -> "src\ndst"
     std::map<std::string, std::map<std::string, std::pair<double, double>>> wire_rc; // type -> wire -> (cap, res)
     auto num = [](const json::Value &v) { return v.isNull() || v.isString() ? (v.isString() ? atof(v.asString().c_str()) : 0.0) : v.asDouble(); };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> real_pips;   // DSP types only: (dst, src)
     auto load_type = [&](const std::string &type) {
         if (site_pins.count(type)) return;
         std::string path = db + "/tile_type_" + type + ".json";
         std::ifstream probe(path);
         if (!probe) { site_pins[type] = {}; return; }
         json::Value tt = json::parse(readFile(path));
+        if (type.rfind("DSP_", 0) == 0)
+            for (const auto &pk : tt.get("pips").members())
+                if (pk.second.get("is_pseudo").asString() != "1")
+                    real_pips[type].push_back({pk.second.get("dst_wire").asString(), pk.second.get("src_wire").asString()});
         if (timing) {
             auto &pt = pip_timing[type];
             for (const auto &pk : tt.get("pips").members()) {
@@ -326,6 +333,30 @@ int main(int argc, char **argv)
             auto d2 = feat.find('.', d1 + 1);
             if (d2 == std::string::npos) continue;
             v.push_back({feat.substr(d1 + 1, d2 - d1 - 1), feat.substr(d2 + 1), kind});
+        }
+        // A DSP input is a mux whose bits select GND or VCC; with neither set it carries the fabric wire (DSP_BYP/DSP_FAN), a
+        // source that has no bit of its own and, for most pins, no ppips line either.  Taken from the database: a destination
+        // that has segbits, and exactly one real pip with none, is driven by that pip when no bit says otherwise.
+        auto rp = real_pips.find(type);
+        if (rp != real_pips.end()) {
+            std::set<std::string> has_bits, has_line;
+            std::ifstream sb(db + "/segbits_" + lower + ".db");
+            while (std::getline(sb, line)) {
+                std::istringstream ls(line);
+                std::string feat;
+                if (!(ls >> feat)) continue;
+                auto d1 = feat.find('.');
+                auto d2 = feat.find('.', d1 + 1);
+                if (d1 == std::string::npos || d2 == std::string::npos) continue;
+                has_bits.insert(feat.substr(d1 + 1, d2 - d1 - 1));
+                has_bits.insert(feat.substr(d1 + 1));
+            }
+            for (const auto &e : v) has_line.insert(e[0]);
+            std::map<std::string, std::vector<std::string>> bitless;
+            for (const auto &pp : rp->second)
+                if (has_bits.count(pp.first) && !has_bits.count(pp.first + "." + pp.second)) bitless[pp.first].push_back(pp.second);
+            for (const auto &b : bitless)
+                if (b.second.size() == 1 && !has_line.count(b.first)) v.push_back({b.first, b.second[0], "inferred"});
         }
         ppips[type] = v;
     };
@@ -587,7 +618,7 @@ int main(int argc, char **argv)
     // FASM, which leaves the chain in pieces however the net graph is grown.
     // Treating the buffer output as the clock source is what the rest of the
     // toolchain does too, and it is honest about being a simplification --
-    // --routed-clock turns it off and leaves the pieces visible.
+    // --simple-clock turns it on; by default the pieces stay visible.
     std::vector<std::string> bufg_outs;
     for (const auto &kv : dc.other_tiles) {
         if (kv.first.rfind("CLK_BUFG", 0) != 0) continue;
@@ -1217,7 +1248,7 @@ module xcol #(
     parameter CY0     = "X",      // the carry mux data input: O5 or the X bypass
     parameter FF_INIT = 1'b0, parameter FF_SRVAL = 1'b0,
     parameter FF5_INIT = 1'b0, parameter FF5_SRVAL = 1'b0,
-    parameter SYNC = 1'b1,
+    parameter SYNC = 1'b1, parameter CLK_INV = 1'b0, parameter CLK_SRC = "",
     parameter FF_THRU = 1'b0,     // the main register is a latch held open: Q = D
     // A column of a deeper distributed RAM.  A 128- or 256-deep single-port
     // RAM spans two or four columns of one slice: each holds 64 of the words,
@@ -1361,6 +1392,33 @@ endmodule
     // union, since a root recorded earlier may since have been merged away.
     std::set<std::string> read_roots;
     for (const auto &w : real_pip_sources) read_roots.insert(dsu.find(w));
+    // ---- which BUFG drives a register's clock --------------------------------
+    // Only meaningful with --routed-clock, which keeps the clock tree's pips as assigns: a slice's clock is walked back through them (one driver
+    // per net) to the first BUFGCTRL output, whose site name is then the register's clock source.  Names the site as the placement does,
+    // BUFGCTRL_X0Y<n>, with the TOP half of the column numbered from 16.
+    std::map<std::string, std::string> clk_src_of_root, bufg_site_of_root;
+    if (!simple_clock) {
+        for (const auto &a : assigns) clk_src_of_root.emplace(dsu.find(a.first), dsu.find(a.second));
+        for (const auto &o : bufg_outs) {
+            auto pos = o.find("BUFGCTRL");
+            if (pos == std::string::npos) continue;
+            int n = atoi(o.c_str() + pos + 8);
+            bool top = o.find("CLK_BUFG_TOP") != std::string::npos;
+            bufg_site_of_root[dsu.find(o)] = "BUFGCTRL_X0Y" + std::to_string(n + (top ? 16 : 0));
+        }
+    }
+    auto clock_source_of = [&](const std::string &clk_raw) -> std::string {
+        if (simple_clock || clk_raw.empty()) return "";
+        std::string x = dsu.find(clk_raw);
+        for (int hops = 0; hops < 400; hops++) {
+            auto b = bufg_site_of_root.find(x);
+            if (b != bufg_site_of_root.end()) return b->second;
+            auto n = clk_src_of_root.find(x);
+            if (n == clk_src_of_root.end() || n->second == x) return "";
+            x = n->second;
+        }
+        return "";
+    };
     for (const auto &kv : dc.slices) {
         const SliceConfig &sc = kv.second;
         auto ti = tiles.find(sc.tile);
@@ -1611,7 +1669,7 @@ endmodule
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval
                << "), .FF5_INIT(1'b" << col.ff5_init << "), .FF5_SRVAL(1'b" << col.ff5_srval
-               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
+               << "), .SYNC(1'b" << (sc.ffsync ? 1 : 0) << "), .CLK_INV(1'b" << (sc.clkinv ? 1 : 0) << "), .CLK_SRC(\"" << clock_source_of(raw("CLK")) << "\"), .FF_THRU(1'b" << (ff_thru ? 1 : 0)
                << "), .DEPTH(" << depth << "), .GROUP(\"" << group << "\"), .GOUT(\"" << gout << "\"))\n"
                << "    \\" << inst_name(sc.tile, sc.site, C, raw(C + "Q"), raw(C + "MUX")) << " (";
             for (int i = 1; i <= 6; i++) body << ".A" << i << "(" << net(C + std::to_string(i)) << "), ";
@@ -1726,6 +1784,70 @@ endmodule
     // identical boundaries and different INIT strings pass here.  That is a
     // real gap and it is deliberate: `fasm2netlist` reads the contents out of
     // the bitstream, and tests/rtl/build_and_check.py compares them.
+    // The configuration a cut hides: what the primitive does with its pins, as instance parameters, decoded from the tile's FASM
+    // features in the way fasm2netlist's own extractor does (src/cells_bram.cpp).  Contents alone (above) left lvs_equiv comparing
+    // every width, write mode and cascade setting of the synthesis against nothing, and a RAMB36 configured wrongly proved equal.
+    //
+    // A 36Kb port is one rung further up the width ladder than the 18Kb tag its lower half carries -- 2 -> 4, 4 -> 9, 9 -> 18,
+    // 18 -> 36 -- and the bottom rung is the ambiguous one (an 18Kb tag of 1 means 1 or 2): the tile's own BRAM36_*_1 tag resolves it.
+    // A tag that is absent altogether means the port is not configured, and is reported as width 0.
+    auto config_params = [&](const BramSite &b) {
+        std::vector<std::string> ps;
+        auto has = [&](const std::string &site, const std::string &feat) {
+            if (site == "RAMB36") {
+                // The tile-level bits (BRAM36_*_WIDTH_*_1, RAM_EXTENSION_*_LOWER) are headed "RAMB36", which is not a site of the tile --
+                // its site is RAMB36_Y0 -- so they were not filed in site_feats above; read them from the tile's feature list.
+                auto t = dc.other_tiles.find(b.tile);
+                if (t == dc.other_tiles.end()) return false;
+                const std::string want = site + "." + feat;
+                for (const auto &f : t->second)
+                    if (f == want) return true;
+                return false;
+            }
+            auto t = site_feats.find(b.tile);
+            if (t == site_feats.end()) return false;
+            auto st = t->second.find(site);
+            return st != t->second.end() && std::find(st->second.begin(), st->second.end(), feat) != st->second.end();
+        };
+        const std::string lo = b.is36 ? std::string("RAMB18_Y0") : b.cfg_site;
+        auto tag = [&](const std::string &which) {
+            for (int n : {18, 9, 4, 2, 1})
+                if (has(lo, which + "_" + std::to_string(n))) return n;
+            return 0;
+        };
+        auto width = [&](const std::string &which) -> int {
+            int t = tag(which);
+            if (!b.is36 || t == 0) return t;
+            switch (t) {
+            case 2: return 4;
+            case 4: return 9;
+            case 9: return 18;
+            case 18: return 36;
+            default: return has("RAMB36", "BRAM36_" + which + "_1") ? 1 : 2;
+            }
+        };
+        auto num = [&](const char *k, int v) { ps.push_back(std::string(".") + k + "(" + std::to_string(v) + ")"); };
+        auto str = [&](const char *k, const std::string &v) { ps.push_back(std::string(".") + k + "(\"" + v + "\")"); };
+        const bool sdp_r = has(lo, "SDP_READ_WIDTH_36"), sdp_w = has(lo, "SDP_WRITE_WIDTH_36");
+        const int full = b.is36 ? 72 : 36;
+        str("RAM_MODE", sdp_r || sdp_w ? "SDP" : "TDP");
+        num("READ_WIDTH_A", sdp_r ? full : width("READ_WIDTH_A"));
+        num("READ_WIDTH_B", sdp_r ? 0 : width("READ_WIDTH_B"));
+        num("WRITE_WIDTH_A", sdp_w ? 0 : width("WRITE_WIDTH_A"));
+        num("WRITE_WIDTH_B", sdp_w ? full : width("WRITE_WIDTH_B"));
+        for (const char *ab : {"A", "B"}) {
+            const std::string m = std::string("WRITE_MODE_") + ab;
+            str(m.c_str(), has(lo, m + "_READ_FIRST") ? "READ_FIRST" : has(lo, m + "_NO_CHANGE") ? "NO_CHANGE" : "WRITE_FIRST");
+            if (b.is36)
+                str((std::string("RAM_EXTENSION_") + ab).c_str(),
+                    has("RAMB36", std::string("RAM_EXTENSION_") + ab + "_LOWER") ? "LOWER" : "NONE");
+        }
+        // A clock's polarity is configuration the cut cannot see (clock pins are not compared): a RAM that captures on the falling edge reads
+        // differently from one that does not.  (The REGCLK pins are left out: when the output register is unused their tag is absent whatever the design says.)  prjxray stores each inversion complemented, so the clock is inverted when its ZINV tag is absent.
+        for (const char *pin : {"CLKARDCLK", "CLKBWRCLK"})
+            ps.push_back(std::string(".IS_") + pin + "_INVERTED(1'b" + (has(lo, std::string("ZINV_") + pin) ? "0" : "1") + ")");
+        return ps;
+    };
     int brams = 0, bram_rows = 0;
     for (const auto &b : bram_sites) {
         if (b.canon.empty()) continue;
@@ -1811,12 +1933,14 @@ endmodule
             for (const auto &p : bram::kRamb18) wire_up(p.name, p.width, p.out, nullptr, p.name);
         if (first) continue;   // the routing touches none of it
         std::vector<std::string> cps = content_params(b);
+        const size_t n_content = cps.size();
+        for (auto &c : config_params(b)) cps.push_back(c);
         std::string pstr;
         for (size_t i = 0; i < cps.size(); i++) pstr += (i ? ", " : "") + cps[i];
         body << "  " << (b.is36 ? "RAMB36E1" : "RAMB18E1")
              << (pstr.empty() ? "" : " #(" + pstr + ")") << " \\" << iname << " (" << o.str()
              << ");\n";
-        if (!cps.empty()) bram_rows += cps.size();
+        bram_rows += n_content;
         brams++;
     }
     if (brams)
@@ -1900,7 +2024,102 @@ endmodule
                 o << ")";
             }
             if (first) continue;   // the routing touches none of it
-            body << "  DSP48E1 \\" << iname << " (" << o.str() << ");\n";
+            // The configuration, decoded from the tile's features the way fasm2netlist's own extractor does (src/cells_dsp.cpp), so that
+            // lvs_equiv has something to hold the synthesis's parameters against.  Until now this instance carried none, and a DSP
+            // configured however the bitstream liked compared equal to one the design asked for.  A "Z" tag stores the complement of the
+            // attribute: absent means 1.
+            std::vector<std::string> dps;
+            {
+                const std::string pre = "DSP48." + site + ".";
+                // A one-bit tag is written either bare or with a "[0]": nextpnr writes ZMREG[0], ZDREG[0] and the other Z...REG enables that way,
+                // Vivado's decode does too, while the others (ZAREG_2_ACASCREG_1, USE_DPORT) are bare.  Matching only the bare name read every
+                // Z...REG as absent -- a register enable of 1 -- whatever the bitstream said.
+                auto tag = [&](const std::string &name) {
+                    const std::string want = pre + name, want0 = want + "[0]";
+                    for (const auto &f : kv.second)
+                        if (f == want || f == want0) return true;
+                    return false;
+                };
+                // a vector attribute, MSB first: "NAME[hi:lo] = bits" lines, or individual "NAME[i]" set-bit flags
+                auto vec = [&](const std::string &name, int width) {
+                    std::string bits(width, '0');
+                    const std::string base = pre + name + "[";
+                    auto ov = dc.other_values.find(tile);
+                    if (ov != dc.other_values.end())
+                        for (const auto &e : ov->second) {
+                            if (e.first.rfind(base, 0) != 0) continue;
+                            int hi = 0;
+                            if (sscanf(e.first.c_str() + base.size(), "%d", &hi) != 1) continue;
+                            std::string v = e.second;
+                            size_t b = v.find('b');
+                            if (b != std::string::npos) v = v.substr(b + 1);
+                            v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+                            for (size_t i = 0; i < v.size(); i++) {
+                                int idx = hi - int(i);
+                                if (idx >= 0 && idx < width) bits[width - 1 - idx] = v[i];
+                            }
+                        }
+                    for (const auto &f : kv.second) {
+                        if (f.rfind(base, 0) != 0 || f.find(':') != std::string::npos) continue;
+                        int idx = -1;
+                        if (sscanf(f.c_str() + base.size(), "%d", &idx) == 1 && idx >= 0 && idx < width) bits[width - 1 - idx] = '1';
+                    }
+                    return bits;
+                };
+                auto zbit = [&](const std::string &z) { return tag(z) ? 0 : 1; };
+                auto zvec = [&](const std::string &z, int width) {
+                    std::string b = vec(z, width);
+                    for (char &c : b) c = c == '1' ? '0' : '1';
+                    return b;
+                };
+                auto hex = [](const std::string &bits) {
+                    std::string pad = bits;
+                    if (pad.size() % 4) pad.insert(0, 4 - pad.size() % 4, '0');
+                    std::string h;
+                    for (size_t i = 0; i < pad.size(); i += 4) {
+                        int v = 0;
+                        for (int k = 0; k < 4; k++) v = (v << 1) | (pad[i + k] == '1');
+                        h += "0123456789abcdef"[v];
+                    }
+                    return std::to_string(bits.size()) + "'h" + h;
+                };
+                auto q = [](const std::string &v) { return "\"" + v + "\""; };
+                auto P = [&](const std::string &k, const std::string &v) { dps.push_back("." + k + "(" + v + ")"); };
+                P("A_INPUT", q(tag("A_INPUT") ? "CASCADE" : "DIRECT"));
+                P("B_INPUT", q(tag("B_INPUT") ? "CASCADE" : "DIRECT"));
+                // xREG and xCASCREG share three bits: xREG_0, xREG_2 and Zx REG_2_xCASCREG_1, and the last only matters when xREG is 2
+                for (char ab : {'A', 'B'}) {
+                    const std::string x(1, ab);
+                    int reg = tag(x + "REG_0") ? 0 : (tag(x + "REG_2") ? 2 : 1);
+                    int casc = reg;
+                    if (reg == 2) casc = tag("Z" + x + "REG_2_" + x + "CASCREG_1") ? 2 : 1;
+                    P(x + "REG", std::to_string(reg));
+                    P(x + "CASCREG", std::to_string(casc));
+                }
+                for (const char *r : {"ADREG", "ALUMODEREG", "CARRYINREG", "CARRYINSELREG", "CREG", "DREG", "INMODEREG", "MREG", "OPMODEREG", "PREG"})
+                    P(r, std::to_string(zbit(std::string("Z") + r)));
+                P("USE_DPORT", q(tag("USE_DPORT") ? "TRUE" : "FALSE"));
+                P("USE_SIMD", q(tag("USE_SIMD_FOUR12") ? "FOUR12" : (tag("USE_SIMD_FOUR12_TWO24") ? "TWO24" : "ONE48")));
+                P("AUTORESET_PATDET", q(!tag("AUTORESET_PATDET_RESET") ? "NO_RESET" : (tag("AUTORESET_PATDET_RESET_NOT_MATCH") ? "RESET_NOT_MATCH" : "RESET_MATCH")));
+                std::string sel_mask = "MASK";
+                for (const char *alt : {"C", "ROUNDING_MODE1", "ROUNDING_MODE2"})
+                    if (tag(std::string("SEL_MASK_") + alt)) sel_mask = alt;
+                P("SEL_MASK", q(sel_mask));
+                // Found with a differential test (see the database's FIXES.md): USE_MULT=NONE and SEL_PATTERN=C each have a bit.  MULTIPLY and
+                // DYNAMIC give the same bits, so the extraction can only say MULTIPLY.  USE_PATTERN_DETECT has no bit at all and is not emitted.
+                P("USE_MULT", q(tag("USE_MULT_NONE") ? "NONE" : "MULTIPLY"));
+                P("SEL_PATTERN", q(tag("SEL_PATTERN_C") ? "C" : "PATTERN"));
+                P("MASK", hex(vec("MASK", 48)));
+                P("PATTERN", hex(vec("PATTERN", 48)));
+                P("IS_ALUMODE_INVERTED", hex(zvec("ZIS_ALUMODE_INVERTED", 4)));
+                P("IS_INMODE_INVERTED", hex(zvec("ZIS_INMODE_INVERTED", 5)));
+                P("IS_OPMODE_INVERTED", hex(zvec("ZIS_OPMODE_INVERTED", 7)));
+                P("IS_CARRYIN_INVERTED", "1'b" + std::to_string(zbit("ZIS_CARRYIN_INVERTED")));
+                P("IS_CLK_INVERTED", "1'b" + std::to_string(zbit("ZIS_CLK_INVERTED")));
+            }
+            std::string dstr;
+            for (size_t i = 0; i < dps.size(); i++) dstr += (i ? ", " : "") + dps[i];
+            body << "  DSP48E1 #(" << dstr << ") \\" << iname << " (" << o.str() << ");\n";
             dsps++;
         }
     }
@@ -1937,6 +2156,46 @@ endmodule
     }
     if (!ddr_sites.empty())
         std::cerr << "  DDR registers cut at their boundary: " << ddr_sites.size() << "\n";
+
+    // ---- the transceiver's parallel outputs ----------------------------
+    // Not modelled, but its RXDATA, RXCHARISK, RXRESETDONE and the rest are Boolean signals the fabric samples.  Left alone they sit on
+    // the pull-up and read as constant 1.  Emitting the block with just those pins makes them a cut point the placement can pair with
+    // the synthesis's own.  Bits the routing never touches are left out of the bus (they feed nothing).
+    for (const auto &kv : dc.other_tiles) {
+        auto ti = tiles.find(kv.first);
+        if (ti == tiles.end() || ti->second.type.rfind("GTX_CHANNEL", 0) != 0) continue;
+        std::map<std::string, std::map<int, std::string>> bus;      // pin -> bit -> wire
+        std::map<std::string, int> single;
+        for (const auto &pins : site_pins[ti->second.type])
+            for (const auto &pw : pins) {
+                std::string base = pw.first;
+                int bit = -1;
+                size_t d = base.size();
+                while (d > 0 && isdigit((unsigned char)base[d - 1])) d--;
+                if (d < base.size() && d > 0) { bit = atoi(base.c_str() + d); base.resize(d); }
+                if (!lvs::gtx_channel_out(base) && !lvs::gtx_channel_out(pw.first)) continue;
+                if (lvs::gtx_channel_out(pw.first)) { base = pw.first; bit = -1; }
+                bus[base][bit < 0 ? 0 : bit] = pw.second;
+            }
+        std::ostringstream o;
+        bool any = false;
+        for (const auto &b : bus) {
+            int hi = b.second.rbegin()->first;
+            std::string cat;
+            bool touched = false;
+            for (int i = hi; i >= 0; i--) {
+                auto w = b.second.find(i);
+                std::string raw = w == b.second.end() ? "" : tw(kv.first, w->second);
+                bool known = !raw.empty() && dsu.parent.count(raw);
+                if (known) { driven_raw.insert(raw); touched = true; }
+                cat += (cat.empty() ? "" : ", ") + (known ? emit_net(raw) : std::string("1'b0"));
+            }
+            if (!touched) continue;
+            o << (any ? ", " : "") << "." << b.first << "({" << cat << "})";
+            any = true;
+        }
+        if (any) body << "  GTXE2_CHANNEL \\" << sanitise(kv.first + "_GTXE2_CHANNEL") << " (" << o.str() << ");\n";
+    }
 
     // ---- the clock manager's LOCKED pin --------------------------------
     // The MMCM itself is not modelled and cannot usefully be: what comes out
@@ -1981,7 +2240,11 @@ endmodule
             size_t n = strlen(suffix);
             return ep.size() >= n && ep.compare(ep.size() - n, n, suffix) == 0;
         };
-        int v = ends_with("GND_WIRE") ? 0 : ends_with("VCC_WIRE") ? 1 : -1;
+        // The DSP tile has its own pair of rails, DSP_GND_L/R and DSP_VCC_L/R: the wires its internal tie-offs (DSP_0_RSTD.DSP_GND_L,
+        // DSP_0_CED.DSP_VCC_L, ...) come from.  They were not recognised, so both took the pull-up and read 1 -- a grounded RSTD extracted as an
+        // asserted reset.  Exact names: wire names that merely contain the letters, such as the transceiver's ...ALIGNDONE, are signals.
+        int v = (ends_with("GND_WIRE") || ends_with("DSP_GND_L") || ends_with("DSP_GND_R")) ? 0
+              : (ends_with("VCC_WIRE") || ends_with("DSP_VCC_L") || ends_with("DSP_VCC_R")) ? 1 : -1;
         if (v < 0)
             continue;
         std::string root = sanitise(dsu.find(ep));
@@ -2261,6 +2524,64 @@ endmodule
     for (const auto &w : carry_wires) os << "  wire " << w << ";\n";
     for (const auto &w : helper_wires) os << "  wire " << w << ";\n";
     for (const auto &a : carry_assigns) os << "  assign " << a.first << " = " << a.second << ";\n";
+    // ---- what feeds each BUFG ------------------------------------------------
+    // With the clock tree traced, a BUFGCTRL's input is followed back through the same one-driver-per-net assigns to the first net that
+    // nothing drives, whose tile and pin name the source: an MMCM output, a transceiver's TXOUTCLK/RXOUTCLK, or (for a clock made in
+    // logic) a slice output.  Written as comment lines the LVS reads: "// lvs-bufg-src <site> <tile> <pin> <fabric|dedicated>": "-" for no pin; the last word says whether the path crossed general routing.
+    if (!simple_clock) {
+        std::map<std::string, std::string> bufg_in;     // BUFGCTRL site -> traced terminal root
+        std::map<std::string, bool> bufg_fabric;        // ...and whether the path went through the general routing (INT tiles)
+        for (const auto &o : bufg_outs) {
+            auto pos = o.find("BUFGCTRL");
+            if (pos == std::string::npos || o.size() < 2 || o.compare(o.size() - 2, 2, "_O") != 0) continue;
+            int n = atoi(o.c_str() + pos + 8);
+            std::string site = "BUFGCTRL_X0Y" + std::to_string(n + (o.find("CLK_BUFG_TOP") != std::string::npos ? 16 : 0));
+            std::string in;
+            for (const char *p : {"_I0", "_I1"}) {
+                std::string w = o.substr(0, o.size() - 2) + p;
+                if (clk_src_of_root.count(dsu.find(w))) { in = w; break; }
+            }
+            if (in.empty()) continue;
+            std::string x = dsu.find(in);
+            bool fab = false;
+            for (int hops = 0; hops < 400; hops++) {
+                if (x.rfind("INT_", 0) == 0 || x.find("_IMUX") != std::string::npos) fab = true;
+                auto nx = clk_src_of_root.find(x);
+                if (nx == clk_src_of_root.end() || nx->second == x) break;
+                x = nx->second;
+            }
+            bufg_in[site] = x;
+            bufg_fabric[site] = fab;
+        }
+        std::map<std::string, std::string> best;        // terminal root -> most telling member wire
+        std::set<std::string> want;
+        for (const auto &kv : bufg_in) want.insert(kv.second);
+        auto rank = [](const std::string &w) {
+            if (w.find("MMCM_CLK") != std::string::npos || w.find("PLL_CLK") != std::string::npos || w.find("OUTCLK") != std::string::npos) return 3;
+            if (w.find("CLBL") != std::string::npos) return 2;
+            return 1;
+        };
+        std::vector<std::string> keys;
+        for (const auto &kv : dsu.parent) keys.push_back(kv.first);
+        for (const auto &k : keys) {
+            const std::string &r = dsu.find(k);
+            if (!want.count(r)) continue;
+            auto b = best.find(r);
+            if (b == best.end() || rank(k) > rank(b->second)) best[r] = k;
+        }
+        for (const auto &kv : bufg_in) {
+            std::string w = best.count(kv.second) ? best[kv.second] : kv.second;
+            auto sl = w.find('/');
+            auto d = std::make_pair(w.substr(0, sl), sl == std::string::npos ? std::string() : w.substr(sl + 1));
+            std::string pin;
+            size_t m = d.second.find("MMCM_");
+            if (m != std::string::npos) pin = d.second.substr(m + 5);
+            else if (d.second.find("PLL_") != std::string::npos) pin = d.second.substr(d.second.find("PLL_") + 4);
+            else if (d.second.find("RXOUTCLK") != std::string::npos) pin = "RXOUTCLK";
+            else if (d.second.find("TXOUTCLK") != std::string::npos) pin = "TXOUTCLK";
+            os << "// lvs-bufg-src " << kv.first << " " << d.first << " " << (pin.empty() ? "-" : pin) << " " << (bufg_fabric[kv.first] ? "fabric" : "dedicated") << "\n";
+        }
+    }
     os << "\n" << body.str() << "endmodule\n";
 
     if (simple_clock && one_clock)

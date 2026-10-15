@@ -77,6 +77,11 @@ bool have_linked_z3();
 // The name that selects the linked library rather than an external binary.
 inline const char *linked_z3_name() { return "libz3"; }
 
+// CaDiCaL, linked: a CDCL SAT solver over a Tseitin encoding of the network, incremental through assumptions.  Several times faster
+// than Z3 on these miters (which are pure Boolean, so an SMT engine buys nothing), and the default when this build has it.
+bool have_linked_cadical();
+inline const char *linked_cadical_name() { return "libcadical"; }
+
 const char *to_string(Result r);
 
 } // namespace lvs

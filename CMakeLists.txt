@@ -58,6 +58,42 @@ else()
   message(STATUS "lvs: LVS_Z3=OFF; solvers will be run as commands")
 endif()
 
+# CaDiCaL, the preferred solver: the miters are pure Boolean, and a CDCL solver over a Tseitin encoding answers them an order of magnitude
+# faster than Z3.  Taken from, in order: an installed copy under CADICAL_ROOT (include/cadical.hpp, lib/libcadical.a), or the
+# third_party/cadical submodule, built here with its own configure/make (`git submodule update --init`).  With neither, Z3 or a command.
+option(LVS_CADICAL "Link CaDiCaL when it is available" ON)
+if(LVS_CADICAL)
+  find_path(CADICAL_INCLUDE_DIR cadical.hpp HINTS ${CADICAL_ROOT}/include $ENV{CADICAL_ROOT}/include NO_DEFAULT_PATH)
+  find_library(CADICAL_LIBRARY NAMES cadical HINTS ${CADICAL_ROOT}/lib $ENV{CADICAL_ROOT}/lib NO_DEFAULT_PATH)
+  if(NOT (CADICAL_INCLUDE_DIR AND CADICAL_LIBRARY))
+    find_path(CADICAL_INCLUDE_DIR cadical.hpp)
+    find_library(CADICAL_LIBRARY NAMES cadical)
+  endif()
+  set(CADICAL_SUBMODULE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cadical)
+  if(CADICAL_INCLUDE_DIR AND CADICAL_LIBRARY)
+    target_include_directories(lvs_miter PUBLIC ${CADICAL_INCLUDE_DIR})
+    target_link_libraries(lvs_miter PUBLIC ${CADICAL_LIBRARY})
+    target_compile_definitions(lvs_miter PUBLIC LVS_HAVE_CADICAL)
+    message(STATUS "lvs: linking ${CADICAL_LIBRARY}")
+  elseif(EXISTS ${CADICAL_SUBMODULE}/configure)
+    include(ExternalProject)
+    ExternalProject_Add(cadical_ext
+      SOURCE_DIR ${CADICAL_SUBMODULE}
+      BUILD_IN_SOURCE 1
+      CONFIGURE_COMMAND ./configure
+      BUILD_COMMAND make -j4
+      INSTALL_COMMAND ""
+      BUILD_BYPRODUCTS ${CADICAL_SUBMODULE}/build/libcadical.a)
+    add_dependencies(lvs_miter cadical_ext)
+    target_include_directories(lvs_miter PUBLIC ${CADICAL_SUBMODULE}/src)
+    target_link_libraries(lvs_miter PUBLIC ${CADICAL_SUBMODULE}/build/libcadical.a)
+    target_compile_definitions(lvs_miter PUBLIC LVS_HAVE_CADICAL)
+    message(STATUS "lvs: building CaDiCaL from the third_party/cadical submodule")
+  else()
+    message(STATUS "lvs: no CaDiCaL (run `git submodule update --init`, or set CADICAL_ROOT); using Z3 or a command")
+  endif()
+endif()
+
 # Structural Verilog reader, generated from src/lvs/verilog.{l,y}.  flex and
 # bison are code generators, not link-time dependencies -- the sources they
 # emit are self-contained C++ -- so this keeps the "no external libraries"
