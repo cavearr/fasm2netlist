@@ -1877,8 +1877,12 @@ endmodule
             int n = width ? width : 1;
             std::vector<std::string> bits;   // MSB first, as a concatenation is written
             bool any = false;
+            // An 18Kb site carries every write enable twice: Vivado puts WEA[i] and WEBWE[i] of the primitive on site pins 2i and
+            // 2i+1, in TDP and in SDP.  nextpnr's packer does the same in SDP; in TDP x18 its WEBWE site pins differ.  Which of the
+            // two the block reads is not measured: this reads pin 2i, where Vivado always has WE[i].
+            const bool doubled_we = !p36 && (std::string(port) == "WEA" || std::string(port) == "WEBWE");
             for (int i = n - 1; i >= 0; i--) {
-                std::string suffix = width ? std::to_string(i) : std::string();
+                std::string suffix = width ? std::to_string(doubled_we ? 2 * i : i) : std::string();
                 std::string bit;
                 std::vector<std::string> sps;
                 if (p36) {
