@@ -110,8 +110,12 @@ Three things are assumed rather than reconstructed, and each is deliberate:
   because a reset synchroniser waits on it.
 - **Memory contents**, as above.
 
-Not covered by the checker: `SRL`s, latches (`LDCE`/`LDPE`) and `DSP48E1`,
-all of which the extractor does decode.
+- **Shift registers** (`SRL16E`, `SRLC16E`, `SRLC32E`) are cut at their output, like a distributed RAM's read: the read address, the data
+  and the enable are compared, with the initial contents (`INIT`). The clock edge and a cascaded `Q15`/`Q31` link are not.
+- **Output delays.** An `ODELAYE2` is a wire from `ODATAIN` to `DATAOUT`, as an `IDELAYE2` is from its input; the tap setting changes when
+  a value arrives, not what it is.
+
+Not covered by the checker: latches (`LDCE`/`LDPE`), which the extractor does decode.
 
 `lvs_equiv --explain` reports, for a failing cone, which named variables each
 side reads. Most failures turn out to be correspondence errors rather than

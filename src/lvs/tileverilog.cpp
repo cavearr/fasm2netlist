@@ -22,9 +22,9 @@
 //     only features saying a column reads one, so the tree is built wherever
 //     a column selects it, wired as nextpnr's own packer wires it.
 //   - CE defaults to 1 and SR to 0 unless CEUSEDMUX / SRUSEDMUX say otherwise.
-//   - carry and distributed RAM are modelled; SRL is not, and a slice using
-//     one still gets an instance with its unmodelled features listed on
-//     stderr.  Block RAM is not modelled either, but it is CUT: the block is
+//   - carry and distributed RAM are modelled; an SRL column is CUT at its
+//     read (its address, data and enable are the boundary, see the SRL
+//     parameter of xcol).  Block RAM is not modelled either, but it is CUT: the block is
 //     instantiated with its pins wired and nothing inside, so a comparison
 //     can treat its reads as free variables and its inputs as obligations.
 //     lvs_equiv keeps its OWN column model in cone.cpp and must agree with
@@ -1242,6 +1242,9 @@ module xcol #(
     parameter [63:0] INIT = 64'h0,
     parameter RAM     = 0,        // 1 = the LUT storage is writable
     parameter RAM32   = 0,        // 1 = two 32-deep halves rather than one 64
+    parameter SRL     = 0,        // 1 = one 32-bit shift register, 2 = two 16-bit ones (O6 = the upper, O5 = the lower)
+    parameter SRLCASC = 0,        // the shift register's data comes from the column above's MC31, which is not modelled
+    parameter MEMNAME = "",       // what the shift register's cut is called: a site, not the register the column also holds
     parameter FF_SRC  = "none",   // O6 | O5 | X | XOR | CY | F7F8 | none
     parameter FF5_SRC = "none",   // O5 | X | none
     parameter OUTMUX  = "none",   // O6 | O5 | 5Q | XOR | CY | F7 | F8 | none
@@ -1576,7 +1579,7 @@ endmodule
                 std::string o6 = raw(std::string(1, c));
                 if (!o6.empty() && read_roots.count(dsu.find(o6))) o6_read = true;
             }
-            if (!col.init && !col.ram && !o6_read && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
+            if (!col.init && !col.ram && !col.srl && !o6_read && !col.ff_used && !col.ff5_used && col.outmux == OutMux::None) continue;
             std::string C(1, c);
             // Distributed RAM.  The write address is one per SLICE, not one
             // per column -- it arrives on the slice's WA pins, which the D
@@ -1586,7 +1589,7 @@ endmodule
             // DI2 is the second datum the 32-deep mode needs, and it is the
             // column's X bypass pin.
             std::string wa = "6'b0", di = "1'b0", di2 = "1'b0", we = "1'b0";
-            if (col.ram) {
+            if (col.ram || col.srl) {
                 std::string w;
                 for (int i = 6; i >= 1; i--) w += (i < 6 ? ", " : "") + net("D" + std::to_string(i));
                 wa = "{" + w + "}";
@@ -1664,7 +1667,8 @@ endmodule
             std::ostringstream initv;
             initv << "64'h" << std::hex << (col.init ? *col.init : 0);
             body << "  xcol #(." << "INIT(" << initv.str() << "), .RAM(" << (col.ram ? 1 : 0)
-               << "), .RAM32(" << (col.ram && col.ram_small ? 1 : 0) << "), .FF_SRC(\"" << ffsrc
+               << "), .RAM32(" << (col.ram && col.ram_small ? 1 : 0) << "), .SRL(" << (col.srl ? (col.ram_small ? 2 : 1) : 0)
+               << "), .SRLCASC(" << (col.srl && col.di1 == Di1Src::Chain ? 1 : 0) << "), .MEMNAME(\"" << (col.srl ? sanitise(sc.tile + "_" + sc.site + "_" + C) : std::string()) << "\"), .FF_SRC(\"" << ffsrc
                << "\"), .FF5_SRC(\"" << ff5src << "\"), .OUTMUX(\"" << to_string(col.outmux)
                << "\"), .CY0(\"" << (col.cy0_o5 ? "O5" : "X") << "\"),\n"
                << "        .FF_INIT(1'b" << col.ff_init << "), .FF_SRVAL(1'b" << col.ff_srval

@@ -216,6 +216,38 @@ RegMap build_regmap(const std::string &placement_path, const std::string &gold_j
         }
     }
 
+    // Shift registers.  An SRL16E sits at a column's 6LUT (the upper half of a 32-bit LUT, read as O6) or its 5LUT (the lower, O5); an
+    // SRLC32E at the 6LUT and takes the whole LUT.  The tile model names the cut after the column's site, as for a RAM.
+    {
+        const json::Value &gcells = mod->get("cells");
+        for (const auto &pv : place.members()) {
+            if (pv.second.get("type").asString() != "SLICE_LUTX") continue;
+            const json::Value &gc = gcells.get(pv.first);
+            if (gc.isNull()) continue;
+            std::string gtype = gc.get("type").asString();
+            if (gtype != "SRL16E" && gtype != "SRLC16E" && gtype != "SRLC32E") continue;
+            std::string bel = pv.second.get("bel").asString();
+            if (bel.size() < 2 || bel[0] < 'A' || bel[0] > 'D') continue;
+            std::string tile = pv.second.get("tile").asString();
+            std::string site = pv.second.get("site").asString();
+            const json::Value &tv = grid.get(tile);
+            if (tv.isNull()) continue;
+            std::vector<std::pair<int, std::string>> sl;
+            for (const auto &sv : tv.get("sites").members())
+                if (sv.first.rfind("SLICE_X", 0) == 0)
+                    sl.push_back({atoi(sv.first.c_str() + 7), sv.first});
+            std::sort(sl.begin(), sl.end());
+            int ord = -1;
+            for (size_t i = 0; i < sl.size(); i++)
+                if (sl[i].second == site) ord = int(i);
+            if (ord < 0) continue;
+            std::string stype = tv.get("sites").get(site).asString();
+            std::string gate = sanitise(tile + "_" + stype + "_X" + std::to_string(ord) + "_" + std::string(1, bel[0]));
+            int d = gtype == "SRLC32E" ? 0 : (bel[1] == '6' ? 1 : 0);
+            out.mem[gate + ":SRL[" + std::to_string(d) + "]"] = pv.first + ":Q[0]";
+        }
+    }
+
     // The deeper single-port RAMs.  A placement cell "<ram>/ADDR<n>" is one
     // column of a RAM128X1S or RAM256X1S (nextpnr's packer names them so,
     // and the Vivado placement dump follows it), and the tile model reads
