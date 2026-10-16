@@ -72,6 +72,11 @@ const std::map<std::string, std::set<std::string>> OPAQUE_OUT = {
     {"PLLE2_BASE", {"LOCKED"}},
     {"IDDR", {"Q1", "Q2"}},
     {"ODDR", {"Q"}},
+    // A shift register's output is a function of what was shifted in over the last N clocks, which no cone of this cycle
+    // states; it is cut as a distributed RAM's read is, and the extraction's SRL column reads the same symbol.
+    {"SRL16E", {"Q"}},
+    {"SRLC16E", {"Q", "Q15"}},
+    {"SRLC32E", {"Q", "Q31"}},
     // A wide SERDES is cut at its boundary exactly as a DDR register is: its
     // serialisation is a function of time this proof has no notion of, so the
     // outputs become free variables and the parallel inputs (D1..D8, or the
@@ -364,7 +369,7 @@ Cones::Cones(const Module &m, BoolNet &net, const std::map<std::string, std::str
                           (WIDE_MUX.count(inst.type) && pin.name == "O") ||
                           is_opaque_out(inst.type, pin.name) ||
                           (BIDIR_RECEIVE.count(inst.type) && pin.name == "O") ||
-                          (inst.type == "IDELAYE2" && pin.name == "DATAOUT") ||
+                          ((inst.type == "IDELAYE2" || inst.type == "ODELAYE2") && pin.name == "DATAOUT") ||
                           (RAM_PORTS.count(inst.type) && pin.name.rfind("DO", 0) == 0) ||
                           (RAM_SINGLE.count(inst.type) && pin.name == "O") ||
                           (is_bram(inst.type) && bram_data_out(pin.name)) ||
@@ -714,6 +719,62 @@ void Cones::collect_mem_ports()
             continue;
         }
 
+        if (inst.type == "SRL16E" || inst.type == "SRLC16E" || inst.type == "SRLC32E") {
+            // Cut at its output: the boundary is the address it reads, the data it takes and the enable that shifts it, and the
+            // initial contents are compared directly.  The clock is assumed common, as for a block RAM.
+            const bool wide = inst.type == "SRLC32E";
+            MemPort mp;
+            mp.where = inst.name;
+            if (wide) {
+                mp.boundary.push_back(group("read address", bits_of(inst, "A", 5)));
+            } else {
+                std::vector<Lit> ra;
+                for (int i = 0; i < 4; i++) ra.push_back(lit_of(inst, "A" + std::to_string(i), LIT_FALSE));
+                mp.boundary.push_back(group("read address", std::move(ra)));
+            }
+            mp.boundary.push_back(group("write data", {lit_of(inst, "D", LIT_FALSE)}));
+            mp.boundary.push_back(group("write enable", {lit_of(inst, "CE", LIT_TRUE)}));
+            if (auto v = inst.param("INIT")) mp.contents["INIT"] = canon_value(*v);
+            mp.out_sym.push_back(mem_cut_name(inst.name, "Q", 0));
+            mem_ports_.push_back(std::move(mp));
+            continue;
+        }
+        if (is_xcol(inst.type) && param_str(inst, "SRL", "0") != "0") {
+            // The same boundary on the extraction's side.  A column holds one 32-deep register or two 16-deep ones: the upper
+            // (O6) takes its data on the X bypass pin, the lower (O5) on the column's DI, and both read at A2..A5 with A1 high
+            // (A6 high selects the upper half).  A 32-deep one reads on A2..A6.  The LUT's INIT holds each register bit twice,
+            // at the A1-high position, which is where the register's own INIT is read from.
+            const int srl = atoi(param_str(inst, "SRL", "0").c_str());
+            const bool casc = param_str(inst, "SRLCASC", "0") != "0";
+            const uint64_t lut = parse_init(param_str(inst, "INIT", "0"));
+            const std::string name = param_str(inst, "MEMNAME", inst.name);
+            for (int h = (srl == 2 ? 1 : 0); h >= 0; h--) {
+                if (srl == 1 && h) continue;
+                MemPort mp;
+                mp.where = name + (srl == 2 ? (h ? " upper" : " lower") : "");
+                const int nr = srl == 2 ? 4 : 5;
+                std::vector<Lit> ra;
+                for (int i = 0; i < nr; i++) {
+                    const Pin *a = inst.find_pin("A" + std::to_string(i + 2));
+                    ra.push_back(a ? eval_expr(a->conn, 0) : LIT_FALSE);
+                }
+                mp.boundary.push_back(group("read address", std::move(ra)));
+                MemPort::Group wd = group("write data", {lit_of(inst, srl == 2 && h ? "DI2" : "DI", LIT_FALSE)});
+                wd.dontcare.assign(1, casc);
+                mp.boundary.push_back(std::move(wd));
+                mp.boundary.push_back(group("write enable", {lit_of(inst, "WE", LIT_FALSE)}));
+                uint64_t init = 0;
+                const int n = srl == 2 ? 16 : 32, base = srl == 2 && h ? 32 : 0;
+                for (int a = 0; a < n; a++)
+                    if ((lut >> (base + 2 * a + 1)) & 1) init |= 1ull << a;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%llx", (unsigned long long)init);
+                mp.contents["INIT"] = buf;
+                mp.out_sym.push_back(mem_cut_name(name, "SRL", srl == 2 ? h : 0));
+                mem_ports_.push_back(std::move(mp));
+            }
+            continue;
+        }
         if (RAM_PORTS.count(inst.type)) {
             // One MemPort per data port; each is 64 stored bits, which is one
             // fabric column, which is what makes them pairable one to one.
@@ -911,6 +972,10 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
     // the two inputs is being delayed.
     if (inst.type == "IDELAYE2" && pin == "DATAOUT")
         return in(param_str(inst, "DELAY_SRC", "IDATAIN") == "DATAIN" ? "DATAIN" : "IDATAIN");
+    // The output delay takes ODATAIN (from the OSERDES or the fabric) to
+    // DATAOUT, the pad's driver; the extraction has no cell for it either.
+    if (inst.type == "ODELAYE2" && pin == "DATAOUT")
+        return in("ODATAIN");
 
     if (inst.type == "CARRY4") {
         // Four stages of the same cell.  The carry into the chain is CYINIT
@@ -964,6 +1029,13 @@ Lit Cones::eval_cell_output(const Instance &inst, const std::string &pin, int de
         };
         uint64_t init = parse_init(param_str(inst, "INIT", "0"));
         bool param_ram = param_str(inst, "RAM", "0") != "0";
+        if ((pin == "O6" || pin == "O5") && param_str(inst, "SRL", "0") != "0") {
+            // A shift register's read is a cut, like a RAM's: the free symbol the paired SRL16E/SRLC32E reads.
+            const int srl = atoi(param_str(inst, "SRL", "0").c_str());
+            std::string key = mem_cut_name(param_str(inst, "MEMNAME", inst.name), "SRL", srl == 2 && pin == "O6" ? 1 : 0);
+            auto c = mem_cut_.find(key);
+            return net_.input(c == mem_cut_.end() ? key : c->second);
+        }
         if (pin == "O6" || pin == "O5") {
             int width = (pin == "O6") ? 6 : 5;
             if (!param_ram) {

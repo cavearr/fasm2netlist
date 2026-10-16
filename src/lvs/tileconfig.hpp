@@ -76,6 +76,9 @@ struct ColumnConfig
     // port, which is why the model can express it without a second cell.
     bool ram = false;
     bool ram_small = false;
+    // Shift register: the LUT is an SRLC32E (or, with ram_small, two SRL16Es sharing it).  LUT.SRL, as LUT.RAM, is a column
+    // whose storage is state; the read is cut at its output and the boundary (address, data, enable) is what gets compared.
+    bool srl = false;
     Di1Src di1 = Di1Src::DI;
 };
 

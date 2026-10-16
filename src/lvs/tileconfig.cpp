@@ -360,6 +360,8 @@ DesignConfig read_fasm(const std::string &path)
             else sc.unhandled.push_back(rest);
         } else if (col_ok && tail == "LUT.RAM") {
             column(c).ram = true;
+        } else if (col_ok && tail == "LUT.SRL") {
+            column(c).srl = true;
         } else if (col_ok && tail == "LUT.SMALL") {
             column(c).ram_small = true;
         } else if (col_ok && tail.rfind("LUT.DI1MUX.", 0) == 0) {
