@@ -678,9 +678,13 @@ void Cones::collect_mem_ports()
                     continue;
                 int w = std::max(p.width, 1);
                 if (p.out) {
+                    const std::string pn = p.name;
                     for (int b = 0; b < w; b++) {
                         std::string bn = net_of_bit(pin->conn, b);
-                        if (!bn.empty()) mp.out_sym.push_back(bn);
+                        if (!bn.empty()) {
+                            mp.out_sym.push_back(bn);
+                            if (pn == "PATTERNDETECT" || pn == "PATTERNBDETECT" || pn == "OVERFLOW" || pn == "UNDERFLOW") mp.patdet_used = true;
+                        }
                     }
                 } else {
                     const std::string name = p.name;

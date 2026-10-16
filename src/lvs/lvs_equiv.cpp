@@ -506,7 +506,7 @@ static int run(int argc, char **argv)
         for (const auto &m : gp)
             if (!m.out_sym.empty()) by_sym[m.out_sym.front()] = &m;
         int mem_pairs = 0, mem_unpaired = 0, mem_rows = 0, mem_content_diff = 0;
-        int dsp_paired = 0, patdet_set = 0;      // for the one parameter the bitstream has no bit for (below)
+        int dsp_paired = 0, patdet_set = 0, patdet_unseen = 0;      // for the one parameter the bitstream has no bit for (below)
         std::set<const Cones::MemPort *> paired_gold;
         for (const auto &t : tp) {
             const Cones::MemPort *gptr = nullptr;
@@ -588,6 +588,15 @@ static int run(int argc, char **argv)
                 // FIXES.md), so there is nothing on the extraction side to hold the synthesis against.  Counted and reported below, not skipped
                 // quietly.
                 if (G.dsp && r == "USE_PATTERN_DETECT") continue;
+                // The pattern detector's own configuration decides nothing a design that neither enables it nor reads its outputs can see:
+                // MASK, PATTERN and the rest only shape PATTERNDETECT/PATTERNBDETECT/OVERFLOW/UNDERFLOW.  A nextpnr that writes the default MASK
+                // (all ones) and one that leaves it out (all zeros in the bitstream) both build the same multiplier.  Not skipped when the
+                // synthesis enables the detector or connects one of those outputs.
+                if (G.dsp && !G.patdet_used && value_of(G.contents, "USE_PATTERN_DETECT") == "nopatdet" &&
+                    (r == "MASK" || r == "PATTERN" || r == "SEL_MASK" || r == "SEL_PATTERN" || r == "AUTORESET_PATDET")) {
+                    patdet_unseen++;
+                    continue;
+                }
                 std::string gv = value_of(G.contents, r);
                 std::string tv = value_of(t.contents, r);
                 // A row the synthesis left undefined -- yosys writes the
@@ -631,6 +640,9 @@ static int run(int argc, char **argv)
         if (dsp_paired)
             std::cout << "not observable in the bitstream, so not compared: USE_PATTERN_DETECT (" << patdet_set << " of " << dsp_paired
                       << " DSPs set it to PATDET)\n";
+        if (patdet_unseen)
+            std::cout << "pattern-detector configuration (MASK, PATTERN, SEL_MASK, SEL_PATTERN, AUTORESET_PATDET) not compared on DSPs that neither enable the "
+                         "detector nor use its outputs: " << patdet_unseen << " rows\n";
         if (mem_content_diff)
             std::cout << "cut primitives: " << mem_content_diff
                       << " contents/configuration difference(s)"
